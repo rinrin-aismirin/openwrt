@@ -1,0 +1,31 @@
+. /lib/functions.sh
+. /lib/functions/system.sh
+. /lib/functions/uci-defaults.sh
+
+air6_raw1_mac() {
+	# Air 6 stock factory data: ASCII key=value block in the raw1 partition (two identical copies).
+	local part mac
+	part="$(find_mmc_part raw1)"
+	[ -n "$part" ] || return 0
+	mac="$(strings "$part" 2>/dev/null | sed -n "s/^$1=//p" | head -n 1)"
+	macaddr_canonicalize "$mac"
+}
+
+board_config_update
+
+case "$(board_name)" in
+softbank,air6)
+	# The two jacks are MT7531 user ports: lan (the jack labelled 1) and wan (labelled 2), as in the stock
+	# switch setup (VLAN1 / VLAN2). Factory data in raw1: mac0 is the MAC the stock firmware uses on br-lan,
+	# mac1 the one its default network script gives to wan.
+	ucidef_set_interfaces_lan_wan "lan" "wan"
+	lan_mac="$(air6_raw1_mac mac0)"
+	wan_mac="$(air6_raw1_mac mac1)"
+	[ -n "$lan_mac" ] && ucidef_set_interface_macaddr "lan" "$lan_mac"
+	[ -n "$wan_mac" ] && ucidef_set_interface_macaddr "wan" "$wan_mac"
+	;;
+esac
+
+board_config_flush
+
+exit 0

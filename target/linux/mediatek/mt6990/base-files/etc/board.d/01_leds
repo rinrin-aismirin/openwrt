@@ -1,0 +1,21 @@
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+case "$(board_name)" in
+softbank,air6)
+	# The jack LEDs hang off SoC GPIOs (led0/led1_ethlanN in the DTS); the MT7531 PHY LED outputs are not used.
+	# Like the stock firmware: led1 lights for a 1000M link, led0 for a 100M link, no activity blinking.
+	ucidef_set_led_netdev "lan_1000" "LAN 1000M" "led1_ethlan1" "lan" "link_1000"
+	ucidef_set_led_netdev "lan_100" "LAN 100M" "led0_ethlan1" "lan" "link_100"
+	ucidef_set_led_netdev "wan_1000" "WAN 1000M" "led1_ethlan2" "wan" "link_1000"
+	ucidef_set_led_netdev "wan_100" "WAN 100M" "led0_ethlan2" "wan" "link_100"
+	# Front panel (AW9523B). The power LED is driven by diag.sh through the led-* aliases.
+	ucidef_set_led_netdev "status" "STATUS" "green:status" "br-lan" "link"
+	ucidef_set_led_wlan "wlan" "WLAN" "blue:wlan" "phy0radio"
+	;;
+esac
+
+board_config_flush
+
+exit 0
