@@ -1,0 +1,102 @@
+From: OpenWrt MT6990 enablement
+Subject: mt76: mt7996: MT6990 endpoint firmware names and board EEPROM only
+
+The MT7996 endpoint of the MT6990 (T830) CPE SoC is identified by PCI
+subsystem 14c3:6639. For it:
+- load the firmware files mt7996_{wm,wa,dsp,rom_patch}_mt6990.bin, the
+  set the board vendor ships for this endpoint; other MT7996 cards keep
+  the upstream names;
+- use the EEPROM from flash (nvmem) only. The strap pins of this endpoint
+  read as the 2+3+3 variant while its board EEPROM describes four paths on
+  every band, so the generic variant check would replace the board
+  calibration with a default file. Accept the board EEPROM when its chip
+  id is valid, and fail the probe when there is none instead of
+  transmitting with default calibration data.
+
+Reduced from the LG6851F 999 patch for the SoftBank Air 6: the EEPROM band
+selector override of mt7996_band_valid() and the cal-free EFUSE skip in
+EEPROM_MODE_DEFAULT_BIN are left out, as is its default EEPROM file.
+---
+diff --git a/mt7996/eeprom.c b/mt7996/eeprom.c
+index ec33521..aa29dd1 100644
+--- a/mt7996/eeprom.c
++++ b/mt7996/eeprom.c
+@@ -181,9 +181,18 @@ static int mt7996_eeprom_load(struct mt7996_dev *dev)
+ 
+ 	if (ret && !mt7996_check_eeprom(dev)) {
+ 		dev->eeprom_mode = EEPROM_MODE_FLASH;
++		/* the MT6990 endpoint is calibrated by its board EEPROM only */
++		if (mt7996_is_mt6990(dev))
++			return 0;
+ 		goto out;
+ 	}
+ 
++	if (mt7996_is_mt6990(dev)) {
++		dev_err(dev->mt76.dev,
++			"MT6990: no valid board EEPROM, not using a default\n");
++		return -EINVAL;
++	}
++
+ 	memset(dev->mt76.eeprom.data, 0, MT7996_EEPROM_SIZE);
+ 	if (mt7996_has_ext_eeprom(dev)) {
+ 		/* external eeprom mode */
+diff --git a/mt7996/mcu.c b/mt7996/mcu.c
+index 02263ed..8046153 100644
+--- a/mt7996/mcu.c
++++ b/mt7996/mcu.c
+@@ -30,6 +30,10 @@
+ 		break;						\
+ 	case MT7996_DEVICE_ID:						\
+ 	default:						\
++		if (mt7996_is_mt6990(_dev)) {			\
++			_fw = MT7996_##name##_MT6990;		\
++			break;					\
++		}						\
+ 		switch ((_dev)->var.type) {			\
+ 		case MT7996_VAR_TYPE_233:			\
+ 			_fw = MT7996_##name##_233;		\
+diff --git a/mt7996/mt7996.h b/mt7996/mt7996.h
+index 69dff43..569a577 100644
+--- a/mt7996/mt7996.h
++++ b/mt7996/mt7996.h
+@@ -8,6 +8,7 @@
+ 
+ #include <linux/interrupt.h>
+ #include <linux/ktime.h>
++#include <linux/pci.h>
+ #include "../mt76_connac.h"
+ #include "regs.h"
+ 
+@@ -49,6 +50,11 @@
+ #define MT7996_FIRMWARE_DSP		"mediatek/mt7996/mt7996_dsp.bin"
+ #define MT7996_ROM_PATCH		"mediatek/mt7996/mt7996_rom_patch.bin"
+ 
++#define MT7996_FIRMWARE_WA_MT6990	"mediatek/mt7996/mt7996_wa_mt6990.bin"
++#define MT7996_FIRMWARE_WM_MT6990	"mediatek/mt7996/mt7996_wm_mt6990.bin"
++#define MT7996_FIRMWARE_DSP_MT6990	"mediatek/mt7996/mt7996_dsp_mt6990.bin"
++#define MT7996_ROM_PATCH_MT6990		"mediatek/mt7996/mt7996_rom_patch_mt6990.bin"
++
+ #define MT7996_FIRMWARE_WA_233		"mediatek/mt7996/mt7996_wa_233.bin"
+ #define MT7996_FIRMWARE_WM_233		"mediatek/mt7996/mt7996_wm_233.bin"
+ #define MT7996_FIRMWARE_DSP_233		MT7996_FIRMWARE_DSP
+@@ -663,6 +669,20 @@ mt7996_phy3(struct mt7996_dev *dev)
+ 	return __mt7996_phy(dev, MT_BAND2);
+ }
+ 
++/* MT7996 endpoint of the MT6990 (T830) CPE SoC, PCI subsystem 14c3:6639 */
++static inline bool
++mt7996_is_mt6990(struct mt7996_dev *dev)
++{
++	struct pci_dev *pdev;
++
++	if (!is_mt7996(&dev->mt76) || !dev_is_pci(dev->mt76.dev))
++		return false;
++
++	pdev = to_pci_dev(dev->mt76.dev);
++	return pdev->subsystem_vendor == PCI_VENDOR_ID_MEDIATEK &&
++	       pdev->subsystem_device == 0x6639;
++}
++
+ static inline bool
+ mt7996_band_valid(struct mt7996_dev *dev, u8 band)
+ {
