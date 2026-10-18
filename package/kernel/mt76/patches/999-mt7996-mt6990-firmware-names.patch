@@ -1,0 +1,77 @@
+From: OpenWrt MT6990 enablement
+Subject: mt76: mt7996: use MT6990 board firmware and EEPROM names
+
+Select the factory-qualified firmware and default EEPROM file for the MT6990
+endpoint identified by PCI subsystem 14c3:6639. Other MT7996 cards keep the
+upstream file names.
+
+Reduced from the LG6851F 999 patch for the SoftBank Air 6: the EEPROM band
+selector override of mt7996_band_valid() and the cal-free EFUSE skip in
+EEPROM_MODE_DEFAULT_BIN are left out. The Air 6 loads its own EEPROM from eMMC
+through nvmem, so both were no-ops for bands 0-2, and the band selector switch
+accepted the reserved RX band index 3.
+---
+diff --git a/mt7996/eeprom.c b/mt7996/eeprom.c
+index ec33521..42a2543 100644
+--- a/mt7996/eeprom.c
++++ b/mt7996/eeprom.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <linux/firmware.h>
++#include <linux/pci.h>
+ #include "mt7996.h"
+ #include "eeprom.h"
+ 
+@@ -49,6 +50,10 @@ static char *mt7996_eeprom_name(struct mt7996_dev *dev)
+ 		return MT7990_EEPROM_DEFAULT;
+ 	case MT7996_DEVICE_ID:
+ 	default:
++		if (dev_is_pci(dev->mt76.dev) &&
++		    to_pci_dev(dev->mt76.dev)->subsystem_device == 0x6639)
++			return "mediatek/mt7996/mt7996_eeprom_mt6990.bin";
++
+ 		switch (dev->var.type) {
+ 		case MT7996_VAR_TYPE_233:
+ 			if (dev->var.fem == MT7996_FEM_INT)
+diff --git a/mt7996/mcu.c b/mt7996/mcu.c
+index 02263ed..6cc26ec 100644
+--- a/mt7996/mcu.c
++++ b/mt7996/mcu.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <linux/firmware.h>
++#include <linux/pci.h>
+ #include <linux/fs.h>
+ #include "mt7996.h"
+ #include "mcu.h"
+@@ -30,6 +31,12 @@
+ 		break;						\
+ 	case MT7996_DEVICE_ID:						\
+ 	default:						\
++		if (dev_is_pci((_dev)->mt76.dev) &&			\
++		    to_pci_dev((_dev)->mt76.dev)->subsystem_device ==	\
++		    0x6639) {					\
++			_fw = MT7996_##name##_MT6990;			\
++			break;						\
++		}							\
+ 		switch ((_dev)->var.type) {			\
+ 		case MT7996_VAR_TYPE_233:			\
+ 			_fw = MT7996_##name##_233;		\
+diff --git a/mt7996/mt7996.h b/mt7996/mt7996.h
+index 69dff43..25d6f98 100644
+--- a/mt7996/mt7996.h
++++ b/mt7996/mt7996.h
+@@ -49,6 +49,11 @@
+ #define MT7996_FIRMWARE_DSP		"mediatek/mt7996/mt7996_dsp.bin"
+ #define MT7996_ROM_PATCH		"mediatek/mt7996/mt7996_rom_patch.bin"
+ 
++#define MT7996_FIRMWARE_WA_MT6990	"mediatek/mt7996/mt7996_wa_mt6990.bin"
++#define MT7996_FIRMWARE_WM_MT6990	"mediatek/mt7996/mt7996_wm_mt6990.bin"
++#define MT7996_FIRMWARE_DSP_MT6990	"mediatek/mt7996/mt7996_dsp_mt6990.bin"
++#define MT7996_ROM_PATCH_MT6990		"mediatek/mt7996/mt7996_rom_patch_mt6990.bin"
++
+ #define MT7996_FIRMWARE_WA_233		"mediatek/mt7996/mt7996_wa_233.bin"
+ #define MT7996_FIRMWARE_WM_233		"mediatek/mt7996/mt7996_wm_233.bin"
+ #define MT7996_FIRMWARE_DSP_233		MT7996_FIRMWARE_DSP
