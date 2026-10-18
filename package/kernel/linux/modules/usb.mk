@@ -1919,6 +1919,29 @@ endef
 $(eval $(call KernelPackage,usb-roles))
 
 
+define KernelPackage/usb-mtu3
+  TITLE:=MediaTek MTU3 USB controller (host only)
+  KCONFIG:= \
+	CONFIG_USB_MTU3 \
+	CONFIG_USB_MTU3_HOST=y \
+	CONFIG_USB_MTU3_GADGET=n \
+	CONFIG_USB_MTU3_DUAL_ROLE=n \
+	CONFIG_USB_MTU3_DEBUG=n
+  DEPENDS:=@TARGET_mediatek +kmod-usb-xhci-mtk
+  FILES:=$(LINUX_DIR)/drivers/usb/mtu3/mtu3.ko
+  AUTOLOAD:=$(call AutoProbe,mtu3)
+  $(call AddDepends/usb)
+endef
+
+define KernelPackage/usb-mtu3/description
+ Kernel support for the MediaTek MTU3 USB controller, built host only.
+ MTU3 powers the controller and creates the xHCI child device that
+ xhci-mtk drives.
+endef
+
+$(eval $(call KernelPackage,usb-mtu3))
+
+
 define KernelPackage/usb-xhci-hcd
   TITLE:=xHCI HCD (USB 3.0) support
   KCONFIG:= CONFIG_USB_XHCI_HCD
