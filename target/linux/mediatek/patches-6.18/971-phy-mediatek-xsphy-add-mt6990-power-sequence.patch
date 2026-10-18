@@ -1,0 +1,173 @@
+From: OpenWrt MT6990 repair <local@mt6990>
+Subject: [PATCH] phy: mediatek: xsphy: add MT6990 power-on sequence
+
+Host-mode subset of 971-usb-mtu3-add-mt6990-cpe-gadget-support.patch
+(LG6851F tree): only its phy-mtk-xsphy.c part, unchanged. The mtu3 parts
+(original QMU GPD layout and checksum, clk-mgr role switch, forced VBUS
+and the optional vusb33 supply) are gadget or board specific and are not
+needed when MTU3 runs as a host controller.
+
+On power-on the U2 PHY is released from the forced suspend, UART and
+BC1.1 states and the U3 PHY gets the TX receiver-detect, PLL current and
+RX equalizer settings of the MT6990 vendor driver. Both are role
+independent; the stock Air 6 kernel logs u2/u3_phy_instance_power_on on
+every role change, including the switch to host.
+
+Selected by the DT property "mediatek,mt6990-power-sequence"; other
+xsphy users are unaffected.
+
+--- a/drivers/phy/mediatek/phy-mtk-xsphy.c
++++ b/drivers/phy/mediatek/phy-mtk-xsphy.c
+@@ -48,6 +48,7 @@
+ 
+ #define XSP_USBPHYACR0	((SSUSB_SIFSLV_U2PHY_COM) + 0x00)
+ #define P2A0_RG_INTR_EN	BIT(5)
++#define P2A0_RG_TX_PH_ROT_SEL GENMASK(26, 24)
+ 
+ #define XSP_USBPHYACR1		((SSUSB_SIFSLV_U2PHY_COM) + 0x04)
+ #define P2A1_RG_INTR_CAL		GENMASK(23, 19)
+@@ -61,8 +62,32 @@
+ #define XSP_USBPHYACR6		((SSUSB_SIFSLV_U2PHY_COM) + 0x018)
+ #define P2A6_RG_BC11_SW_EN	BIT(23)
+ #define P2A6_RG_OTG_VBUSCMP_EN	BIT(20)
++#define P2A6_RG_U2_PHY_REV6 GENMASK(31, 30)
++#define P2A6_RG_U2_PHY_REV GENMASK(31, 24)
++
++#define XSP_USBPHYACR4 ((SSUSB_SIFSLV_U2PHY_COM) + 0x020)
++#define P2A4_U2_GPIO_CTR_MSK (BIT(9) | BIT(8))
++#define XSP_U2PHYDTM0 ((SSUSB_SIFSLV_U2PHY_COM) + 0x068)
++#define P2D_FORCE_UART_EN BIT(26)
++#define P2D_FORCE_DATAIN BIT(23)
++#define P2D_FORCE_DM_PULLDOWN BIT(21)
++#define P2D_FORCE_DP_PULLDOWN BIT(20)
++#define P2D_FORCE_XCVRSEL BIT(19)
++#define P2D_FORCE_SUSPENDM BIT(18)
++#define P2D_FORCE_TERMSEL BIT(17)
++#define P2D_RG_DATAIN GENMASK(13, 10)
++#define P2D_RG_DMPULLDOWN BIT(7)
++#define P2D_RG_DPPULLDOWN BIT(6)
++#define P2D_RG_XCVRSEL GENMASK(5, 4)
++#define P2D_RG_SUSPENDM BIT(3)
++#define P2D_RG_TERMSEL BIT(2)
++#define P2D_DTM0_PART_MASK (P2D_FORCE_DATAIN | P2D_FORCE_DM_PULLDOWN | \
++	P2D_FORCE_DP_PULLDOWN | P2D_FORCE_XCVRSEL | P2D_FORCE_SUSPENDM | \
++	P2D_FORCE_TERMSEL | P2D_RG_DMPULLDOWN | P2D_RG_DPPULLDOWN | \
++	P2D_RG_TERMSEL)
+ 
+ #define XSP_U2PHYDTM1		((SSUSB_SIFSLV_U2PHY_COM) + 0x06C)
++#define P2D_RG_UART_EN BIT(16)
+ #define P2D_FORCE_IDDIG		BIT(9)
+ #define P2D_RG_VBUSVALID	BIT(5)
+ #define P2D_RG_SESSEND		BIT(4)
+@@ -71,6 +96,22 @@
+ 
+ #define SSPXTP_PHYA_GLB_00		((SSPXTP_SIFSLV_PHYA_GLB) + 0x00)
+ #define RG_XTP_GLB_BIAS_INTR_CTRL		GENMASK(21, 16)
++#define SSPXTP_DIG_GLB_28 ((SSPXTP_SIFSLV_DIG_GLB) + 0x028)
++#define RG_XTP_DAIF_GLB_TXPLL_IR GENMASK(17, 13)
++#define SSPXTP_DIG_GLB_38 ((SSPXTP_SIFSLV_DIG_GLB) + 0x038)
++#define RG_XTP_DAIF_GLB_SPLL_IR GENMASK(17, 13)
++#define SSPXTP_DAIG_LN_DAIF_04 ((SSPXTP_SIFSLV_DIG_LN_DAIF) + 0x04)
++#define RG_XTP0_DAIF_FRC_LN_RX_AEQ_ATT BIT(17)
++#define SSPXTP_DAIG_LN_DAIF_14 ((SSPXTP_SIFSLV_DIG_LN_DAIF) + 0x014)
++#define RG_XTP0_DAIF_LN_RX_AEQ_ATT GENMASK(20, 18)
++#define SSPXTP_DAIG_LN_DAIF_20 ((SSPXTP_SIFSLV_DIG_LN_DAIF) + 0x020)
++#define RG_XTP0_DAIF_LN_G1_RX_SGDT_HF GENMASK(23, 22)
++#define SSPXTP_DAIG_LN_DAIF_2C ((SSPXTP_SIFSLV_DIG_LN_DAIF) + 0x02c)
++#define RG_XTP0_DAIF_LN_G2_RX_SGDT_HF GENMASK(23, 22)
++#define SSPXTP_PHYA_LN_08 ((SSPXTP_SIFSLV_PHYA_LN) + 0x08)
++#define RG_XTP_LN0_TX_RXDET_HZ BIT(13)
++#define SSPXTP_PHYA_LN_30 ((SSPXTP_SIFSLV_PHYA_LN) + 0x030)
++#define RG_XTP_LN0_RX_AEQ_ATT BIT(14)
+ 
+ #define SSPXTP_PHYA_LN_04	((SSPXTP_SIFSLV_PHYA_LN) + 0x04)
+ #define RG_XTP_LN0_TX_IMPSEL		GENMASK(4, 0)
+@@ -116,6 +157,7 @@
+ 	int nphys;
+ 	int src_ref_clk; /* MHZ, reference clock for slew rate calibrate */
+ 	int src_coef;    /* coefficient for slew rate calibrate */
++	bool mt6990_power_seq;
+ };
+ 
+ static void u2_phy_slew_rate_calibrate(struct mtk_xsphy *xsphy,
+@@ -193,15 +235,61 @@
+ 	void __iomem *pbase = inst->port_base;
+ 	u32 index = inst->index;
+ 
++	if (xsphy->mt6990_power_seq) {
++		mtk_phy_set_bits(pbase + XSP_U2PHYDTM0, P2D_FORCE_SUSPENDM);
++		mtk_phy_clear_bits(pbase + XSP_U2PHYDTM0, P2D_RG_SUSPENDM);
++		mtk_phy_set_bits(pbase + XSP_U2PHYDTM0, P2D_RG_SUSPENDM);
++		udelay(30);
++		mtk_phy_clear_bits(pbase + XSP_U2PHYDTM0,
++				   P2D_FORCE_SUSPENDM | P2D_RG_SUSPENDM |
++				   P2D_FORCE_UART_EN | P2D_RG_XCVRSEL |
++				   P2D_RG_DATAIN | P2D_DTM0_PART_MASK);
++		mtk_phy_clear_bits(pbase + XSP_U2PHYDTM1, P2D_RG_UART_EN);
++		mtk_phy_clear_bits(pbase + XSP_USBPHYACR4,
++				   P2A4_U2_GPIO_CTR_MSK);
++		mtk_phy_clear_bits(pbase + XSP_USBPHYACR6, P2A6_RG_BC11_SW_EN);
++	}
++
+ 	mtk_phy_set_bits(pbase + XSP_USBPHYACR6, P2A6_RG_OTG_VBUSCMP_EN);
+ 
+ 	mtk_phy_update_bits(pbase + XSP_U2PHYDTM1,
+ 			    P2D_RG_VBUSVALID | P2D_RG_AVALID | P2D_RG_SESSEND,
+ 			    P2D_RG_VBUSVALID | P2D_RG_AVALID);
++	if (xsphy->mt6990_power_seq) {
++		mtk_phy_update_field(pbase + XSP_USBPHYACR6,
++				     P2A6_RG_U2_PHY_REV6, 1);
++		udelay(800);
++		mtk_phy_update_field(pbase + XSP_USBPHYACR0,
++				     P2A0_RG_TX_PH_ROT_SEL, 0);
++		mtk_phy_update_field(pbase + XSP_USBPHYACR6,
++				     P2A6_RG_U2_PHY_REV, 0);
++	}
+ 
+ 	dev_dbg(xsphy->dev, "%s(%d)\n", __func__, index);
+ }
+ 
++static void u3_phy_instance_power_on(struct mtk_xsphy *xsphy,
++				     struct xsphy_instance *inst)
++{
++	void __iomem *pbase = inst->port_base;
++
++	mtk_phy_clear_bits(pbase + SSPXTP_PHYA_LN_08, RG_XTP_LN0_TX_RXDET_HZ);
++	mtk_phy_update_field(xsphy->glb_base + SSPXTP_DIG_GLB_28,
++			     RG_XTP_DAIF_GLB_TXPLL_IR, 4);
++	mtk_phy_update_field(xsphy->glb_base + SSPXTP_DIG_GLB_38,
++			     RG_XTP_DAIF_GLB_SPLL_IR, 4);
++	mtk_phy_update_field(pbase + SSPXTP_DAIG_LN_DAIF_20,
++			     RG_XTP0_DAIF_LN_G1_RX_SGDT_HF, 2);
++	mtk_phy_update_field(pbase + SSPXTP_DAIG_LN_DAIF_2C,
++			     RG_XTP0_DAIF_LN_G2_RX_SGDT_HF, 2);
++	mtk_phy_set_bits(pbase + SSPXTP_PHYA_LN_30, RG_XTP_LN0_RX_AEQ_ATT);
++	mtk_phy_update_field(pbase + SSPXTP_DAIG_LN_DAIF_14,
++			     RG_XTP0_DAIF_LN_RX_AEQ_ATT, 7);
++	mtk_phy_set_bits(pbase + SSPXTP_DAIG_LN_DAIF_04,
++			 RG_XTP0_DAIF_FRC_LN_RX_AEQ_ATT);
++	dev_info(xsphy->dev, "%s(%d)\n", __func__, inst->index);
++}
++
+ static void u2_phy_instance_power_off(struct mtk_xsphy *xsphy,
+ 				      struct xsphy_instance *inst)
+ {
+@@ -418,7 +506,8 @@
+ 	if (inst->type == PHY_TYPE_USB2) {
+ 		u2_phy_instance_power_on(xsphy, inst);
+ 		u2_phy_slew_rate_calibrate(xsphy, inst);
+-	}
++	} else if (inst->type == PHY_TYPE_USB3 && xsphy->mt6990_power_seq)
++		u3_phy_instance_power_on(xsphy, inst);
+ 
+ 	return 0;
+ }
+@@ -543,6 +632,8 @@
+ 
+ 	xsphy->src_ref_clk = XSP_REF_CLK;
+ 	xsphy->src_coef = XSP_SLEW_RATE_COEF;
++	xsphy->mt6990_power_seq = device_property_read_bool(dev,
++						"mediatek,mt6990-power-sequence");
+ 	/* update parameters of slew rate calibrate if exist */
+ 	device_property_read_u32(dev, "mediatek,src-ref-clk-mhz",
+ 				 &xsphy->src_ref_clk);

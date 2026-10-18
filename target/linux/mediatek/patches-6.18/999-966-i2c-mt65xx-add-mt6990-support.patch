@@ -1,0 +1,36 @@
+From: Rinrin <rinrin@aismir.in>
+Subject: [PATCH] i2c: mt65xx: add MT6990 support
+
+The MT6990 (T830) I2C controller uses the MT8192 feature set with the
+register layout of MT8188 (slave address at 0x94). This matches the data
+the vendor kernel uses for "mediatek,mt6990-i2c".
+---
+--- a/drivers/i2c/busses/i2c-mt65xx.c
++++ b/drivers/i2c/busses/i2c-mt65xx.c
+@@ -521,10 +521,26 @@
+ 	.max_dma_support = 36,
+ };
+ 
++/* MT8192 flags with the v3 register layout (slave address at 0x94) */
++static const struct mtk_i2c_compatible mt6990_compat = {
++	.quirks = &mt8183_i2c_quirks,
++	.regs = mt_i2c_regs_v3,
++	.pmic_i2c = 0,
++	.dcm = 0,
++	.auto_restart = 1,
++	.aux_len_reg = 1,
++	.timing_adjust = 1,
++	.dma_sync = 1,
++	.ltiming_adjust = 1,
++	.apdma_sync = 1,
++	.max_dma_support = 36,
++};
++
+ static const struct of_device_id mtk_i2c_of_match[] = {
+ 	{ .compatible = "mediatek,mt2712-i2c", .data = &mt2712_compat },
+ 	{ .compatible = "mediatek,mt6577-i2c", .data = &mt6577_compat },
+ 	{ .compatible = "mediatek,mt6589-i2c", .data = &mt6589_compat },
++	{ .compatible = "mediatek,mt6990-i2c", .data = &mt6990_compat },
+ 	{ .compatible = "mediatek,mt7622-i2c", .data = &mt7622_compat },
+ 	{ .compatible = "mediatek,mt7981-i2c", .data = &mt7981_compat },
+ 	{ .compatible = "mediatek,mt7986-i2c", .data = &mt7986_compat },
