@@ -1157,8 +1157,7 @@
 #endif
 		};
 
-		/* Modem (CCCI): not compiled in, see the modem note at the end of this file */
-#if 0
+		/* Modem (CCCI): see the modem note at the end of this file */
 		md1_sim1_hot_plug_eint {
 			compatible = "mediatek,md1_sim1_hot_plug_eint-eint";
 			interrupts = <0 4>;
@@ -1193,7 +1192,6 @@
 			compatible = "mediatek,md_attr_node";
 			mediatek,md_product_name_model_id = <252645135>;
 		};
-#endif /* modem */
 	};
 
 	mdpsys: syscon@14000000 {
@@ -1567,12 +1565,20 @@
 	};
 
 	/*
-	 * Modem (CCCI, MD1): described from the stock device tree, not compiled in.
-	 * The hardware is present, but this tree has no driver for it yet; remove the
-	 * #if 0 when one is added. /mddriver and /medmcu stay compiled because LK
-	 * writes the modem memory layout into them.
+	 * Modem (CCCI, MD1), described from the stock device tree. The nodes are used
+	 * only by the optional modem drivers; without them they stay unbound and the
+	 * MD power domain is switched off as unused. LK writes the modem memory layout
+	 * into /mddriver and /medmcu.
 	 */
-#if 0
+	/*
+	 * Second view of TOPCKGEN as in the stock tree: the CCCI modem driver
+	 * looks it up by this compatible and maps it on its own.
+	 */
+	topckgen@10000000 {
+		compatible = "mediatek,topckgen", "syscon";
+		reg = <0 0x10000000 0 0x1000>;
+	};
+
 	dpmaif@10011000 {
 		compatible = "mediatek,dpmaif";
 		reg = <0 0x10011000 0 0x1000>,
@@ -1767,12 +1773,11 @@
 		};
 	};
 
-	cldma_sys_ap {
+	cldma@1004a000 {
 		compatible = "mediatek,cldma_sys_ap";
 		reg = <0 0x1004a000 0 0x1000>, <0 0x1021e000 0 0x1000>;
 		interrupts = <GIC_SPI 285 IRQ_TYPE_LEVEL_HIGH>;
 		clock-names = "infra-cldma0-rh";
 		mediatek,hif_ids = <1>;
 	};
-#endif /* modem */
 };

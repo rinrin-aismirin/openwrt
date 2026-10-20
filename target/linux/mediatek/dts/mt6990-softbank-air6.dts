@@ -157,9 +157,26 @@
 	};
 #endif
 
-	/* Modem side (NTC sensors of the RF front end): not compiled in, see the modem note in mt6990.dtsi. */
-#if 0
-	thermal_ntc2: thermal-ntc2 {
+	/* Modem side (NTC sensors of the RF front end), see the modem note in mt6990.dtsi. */
+	/* Modem GPIO names, queried by the modem through the CCCI RPC port (stock tree). */
+	gpio-usage-mapping {
+		compatible = "mediatek,gpio_usage_mapping";
+		GPIO_FDD_BAND_SUPPORT_DETECT_1ST_PIN = <&pio 176 0>;
+		GPIO_FDD_BAND_SUPPORT_DETECT_2ND_PIN = <&pio 177 0>;
+		GPIO_FDD_BAND_SUPPORT_DETECT_3RD_PIN = <&pio 178 0>;
+		GPIO_FDD_BAND_SUPPORT_DETECT_4TH_PIN = <&pio 179 0>;
+		GPIO_FDD_BAND_SUPPORT_DETECT_5TH_PIN = <&pio 158 0>;
+		GPIO_SIM1_HOT_PLUG = <&pio 37 0>;
+		GPIO_SIM1_SCLK = <&pio 41 0>;
+		GPIO_SIM1_SIO = <&pio 39 0>;
+		GPIO_SIM1_SRST = <&pio 40 0>;
+		GPIO_SIM2_HOT_PLUG = <&pio 38 0>;
+		GPIO_SIM2_SCLK = <&pio 42 0>;
+		GPIO_SIM2_SIO = <&pio 44 0>;
+		GPIO_SIM2_SRST = <&pio 43 0>;
+	};
+
+	thermal_ntc2: thermal-sensor@128050d8 {
 		compatible = "mediatek,mt6980-board-ntc";
 		reg = <0 0x128050d8 0 0x4>;
 		temperature-lookup-table = <(-40000) 4397119
@@ -331,7 +348,7 @@
 		#thermal-sensor-cells = <0>;
 	};
 
-	thermal_ntc3: thermal-ntc3 {
+	thermal_ntc3: thermal-sensor@128050dc {
 		compatible = "mediatek,mt6980-board-ntc";
 		reg = <0 0x128050dc 0 0x4>;
 		temperature-lookup-table = <(-40000) 4397119
@@ -503,7 +520,7 @@
 		#thermal-sensor-cells = <0>;
 	};
 
-	thermal_ntc4: thermal-ntc4 {
+	thermal_ntc4: thermal-sensor@128050e0 {
 		compatible = "mediatek,mt6980-board-ntc";
 		reg = <0 0x128050e0 0 0x4>;
 		temperature-lookup-table = <(-40000) 4397119
@@ -682,19 +699,19 @@
 			thermal-sensors = <&thermal_ntc2>;
 
 			trips {
-				nrpa_ntc_trip: nrpa_ntc_trip@0 {
+				nrpa_ntc_trip: trip-point0 {
 					temperature = <82000>;
 					hysteresis = <2000>;
 					type = "passive";
 				};
 
-				nrpa_ntc_trip_1: nrpa_ntc_trip@1 {
+				nrpa_ntc_trip_1: trip-point1 {
 					temperature = <90000>;
 					hysteresis = <2000>;
 					type = "passive";
 				};
 
-				nrpa_ntc_trip@2 {
+				trip-point2 {
 					temperature = <100000>;
 					hysteresis = <2000>;
 					type = "critical";
@@ -722,19 +739,19 @@
 			thermal-sensors = <&thermal_ntc3>;
 
 			trips {
-				ltepa_ntc_trip: ltepa_ntc_trip@0 {
+				ltepa_ntc_trip: trip-point0 {
 					temperature = <82000>;
 					hysteresis = <2000>;
 					type = "passive";
 				};
 
-				ltepa_ntc_trip_1: ltepa_ntc_trip@1 {
+				ltepa_ntc_trip_1: trip-point1 {
 					temperature = <90000>;
 					hysteresis = <2000>;
 					type = "passive";
 				};
 
-				ltepa_ntc_trip@2 {
+				trip-point2 {
 					temperature = <100000>;
 					hysteresis = <2000>;
 					type = "critical";
@@ -762,7 +779,7 @@
 			thermal-sensors = <&thermal_ntc4>;
 
 			trips {
-				rf_ntc_crit@0 {
+				rf-ntc-crit {
 					temperature = <100000>;
 					hysteresis = <2000>;
 					type = "critical";
@@ -776,7 +793,7 @@
 			thermal-sensors = <&md_rf_ic>;
 
 			trips {
-				md_rf_crit@0 {
+				md-rf-crit {
 					temperature = <117000>;
 					hysteresis = <2000>;
 					type = "critical";
@@ -784,7 +801,6 @@
 			};
 		};
 	};
-#endif /* modem */
 };
 
 &eth {
