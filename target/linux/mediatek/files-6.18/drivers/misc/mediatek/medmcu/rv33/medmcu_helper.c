@@ -189,6 +189,51 @@ unsigned int scp_reset_by_cmd;
 unsigned int scp_reset_by_md_excep;
 bool pended_dpmaif_ready;
 
+/*
+ * What MEDMCU may do with the DPMAIF hardware, for the DPMAIF stop/ready
+ * handshake. Read and changed under medmcu_dpmaif_lock together with
+ * pended_dpmaif_ready (a reset is scheduled from interrupt context too).
+ *
+ * medmcu_handover_mutex serializes whole operations around it: a table
+ * handover from its decision to its IPI, a stop from its decision to its ack
+ * or stop IPI, and a reset's restart of MEDMCU (RSTN_CLR) with the NO_TABLE
+ * that follows. So no handover decided before a stop or a restart can still
+ * send its table after that stop's ack or into the restarted MEDMCU.
+ */
+enum medmcu_dpmaif_state {
+	/* Started (or restarted by a reset) and not given a DPMAIF table since: it does not access DPMAIF. */
+	MEDMCU_DPMAIF_NO_TABLE,
+	/* Given a DPMAIF table: it may access DPMAIF until it acknowledges a stop or is reset. */
+	MEDMCU_DPMAIF_RUNNING,
+	/* A reset is scheduled or running; it ends with MEDMCU restarted from its initial state. */
+	MEDMCU_DPMAIF_RESETTING,
+};
+static DEFINE_SPINLOCK(medmcu_dpmaif_lock);
+static DEFINE_MUTEX(medmcu_handover_mutex);
+static enum medmcu_dpmaif_state medmcu_dpmaif_state = MEDMCU_DPMAIF_NO_TABLE;
+
+static void medmcu_dpmaif_set_state(enum medmcu_dpmaif_state state)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&medmcu_dpmaif_lock, flags);
+	medmcu_dpmaif_state = state;
+	spin_unlock_irqrestore(&medmcu_dpmaif_lock, flags);
+}
+
+/* Around a reset's restart of MEDMCU: wait for a handover or stop in progress, restart, then NO_TABLE. */
+static void medmcu_restart_begin(void)
+{
+	mutex_lock(&medmcu_handover_mutex);
+}
+
+static void medmcu_restart_end(void)
+{
+	/* Restarted from its initial state: no DPMAIF table. */
+	medmcu_dpmaif_set_state(MEDMCU_DPMAIF_NO_TABLE);
+	mutex_unlock(&medmcu_handover_mutex);
+}
+
 int scp_wdt_reset_enable;
 int scp_wdt_reset_timeout;
 
@@ -339,11 +384,6 @@ static void notify_medmcu_unmask_irq(void)
 static void medmcu_set_ignore_stop_ipi_flag(unsigned int flag)
 {
 	g_medmcu.ignore_stop_ipi_flag = flag;
-}
-
-static bool medmcu_ignore_stop_ipi(void)
-{
-	return (g_medmcu.ignore_stop_ipi_flag == 1);
 }
 
 struct medmcu_desc_info_t *get_desc_info(void)
@@ -851,15 +891,43 @@ extern void ccci_dpmaif_register_notify(struct notifier_block *nb);
 extern void ccci_scp_set_register(void (*fn)(struct notifier_block *nb));
 extern void ccci_set_medmcu_desc_info(void *(*fn)(void));
 
-static void handle_dpmaif_ready(void)
+/*
+ * Hand the DPMAIF table over. held: called for a ready event that was held
+ * back; it is handed over only if no stop dropped it meanwhile.
+ * Call with medmcu_handover_mutex held.
+ */
+static void handle_dpmaif_ready(bool held)
 {
 	int ret = 0;
 	int cnt = 0;
 	struct med_ipi_addr_msg ipi_data;
 	uint32_t non_support_len_to_med = MED_WAN_MTU; // mdma tso length
 	uint32_t *msg_data = ipi_data.msg_data;
+	unsigned long flags;
 
+	/*
+	 * Hand the table over only to a started MEDMCU that is not being reset;
+	 * otherwise keep the ready event pending until it is ready again.
+	 */
+	spin_lock_irqsave(&medmcu_dpmaif_lock, flags);
+	if (held && !pended_dpmaif_ready) {
+		spin_unlock_irqrestore(&medmcu_dpmaif_lock, flags);
+		return;
+	}
+	if (medmcu_dpmaif_state == MEDMCU_DPMAIF_RESETTING || !is_scp_ready(SCP_A_ID)) {
+		pended_dpmaif_ready = true;
+		spin_unlock_irqrestore(&medmcu_dpmaif_lock, flags);
+		pr_notice("[MEDMCU] Pending CCCI_DPMAIF_EVENT_READY since SCP not ready!\n");
+		return;
+	}
 	pended_dpmaif_ready = false;
+	medmcu_dpmaif_state = MEDMCU_DPMAIF_RUNNING;
+	spin_unlock_irqrestore(&medmcu_dpmaif_lock, flags);
+	/*
+	 * After a watchdog reset the next stop could be acknowledged without
+	 * asking MEDMCU; with a table it has to go through MEDMCU again.
+	 */
+	medmcu_set_ignore_stop_ipi_flag(0);
 
 	pr_notice("[MEDMCU]Receive CCCI_DPMAIF_EVENT_READY!, tso length=%d\n", non_support_len_to_med);
 
@@ -959,29 +1027,72 @@ static void handle_dpmaif_stop(void)
 		pr_notice("[MEDMCU] IPI_OUT_MED_STOP send ok!\n");
 }
 
+enum medmcu_stop_action {
+	MEDMCU_STOP_ACK,	/* acknowledge now: MEDMCU has no DPMAIF table */
+	MEDMCU_STOP_ASK,	/* ask MEDMCU to stop; its ack leads to a reset and then the ack */
+	MEDMCU_STOP_WAIT,	/* a reset is under way and sends the ack when it is done */
+};
+
+/* Decide how to answer a DPMAIF stop, in one step with the state it rests on. */
+static enum medmcu_stop_action medmcu_stop_decide(void)
+{
+	enum medmcu_stop_action action;
+	unsigned long flags;
+
+	spin_lock_irqsave(&medmcu_dpmaif_lock, flags);
+	/* A ready event still pending must not reach MEDMCU after this stop. */
+	pended_dpmaif_ready = false;
+	switch (medmcu_dpmaif_state) {
+	case MEDMCU_DPMAIF_RESETTING:
+		action = MEDMCU_STOP_WAIT;
+		break;
+	case MEDMCU_DPMAIF_NO_TABLE:
+		action = MEDMCU_STOP_ACK;
+		break;
+	default:
+		action = MEDMCU_STOP_ASK;
+		break;
+	}
+	spin_unlock_irqrestore(&medmcu_dpmaif_lock, flags);
+	return action;
+}
+
 static int ccci_apsync_event(struct notifier_block *this,
 		unsigned long event, void *ptr)
 {
 	switch (event) {
 	case CCCI_DPMAIF_EVENT_STOP:
-		if (!is_scp_ready(SCP_A_ID)) {
+		mutex_lock(&medmcu_handover_mutex);
+		switch (medmcu_stop_decide()) {
+		case MEDMCU_STOP_WAIT:
+			/*
+			 * The reset ends with SCP_EVENT_STOP_ACK or SCP_EVENT_STOP_BY_WDT
+			 * once MEDMCU was restarted; a reset that does not end there
+			 * leaves DPMAIF to time out and fail closed.
+			 */
+			pr_notice("[MEDMCU] %s(): stop during a reset, the ack follows the reset\n",
+					  __func__);
+			break;
+		case MEDMCU_STOP_ACK:
+			/*
+			 * No DPMAIF table since MEDMCU was (re)started. A reset that
+			 * starts now restarts it without one, so this stays true.
+			 */
+			medmcu_set_ignore_stop_ipi_flag(0);
 			pr_notice("[MEDMCU] %s(): scp_extern_notify SCP_EVENT_STOP_ACK\n",
 					  __func__);
 			scp_extern_notify(SCP_EVENT_STOP_ACK);
-		} else if (medmcu_ignore_stop_ipi()) {
-			medmcu_set_ignore_stop_ipi_flag(0);
-			pr_notice("[MEDMCU] %s(): scp_extern_notify SCP_EVENT_STOP_ACK\n",
-				__func__);
-			scp_extern_notify(SCP_EVENT_STOP_ACK);
-		} else
+			break;
+		default:
 			handle_dpmaif_stop();
+			break;
+		}
+		mutex_unlock(&medmcu_handover_mutex);
 		break;
 	case CCCI_DPMAIF_EVENT_READY:
-		if (!is_scp_ready(SCP_A_ID)) {
-			pr_notice("[MEDMCU] Pending CCCI_DPMAIF_EVENT_READY since SCP not ready!\n");
-			pended_dpmaif_ready = true;
-		} else
-			handle_dpmaif_ready();
+		mutex_lock(&medmcu_handover_mutex);
+		handle_dpmaif_ready(false);
+		mutex_unlock(&medmcu_handover_mutex);
 		break;
 	default:
 		break;
@@ -1073,20 +1184,34 @@ static void scp_A_notify_ws(struct work_struct *ws)
 
 
 	if (scp_notify_flag) {
+		unsigned long flags;
+		bool pended;
+
 		scp_recovery_flag[SCP_A_ID] = SCP_A_RECOVERY_OK;
 
-		if (pended_dpmaif_ready) {
-#if (TEST_WITHOUT_CCCI == 0)
-			handle_dpmaif_ready();
-#endif
-		}
-
-		mutex_lock(&scp_A_notify_mutex);
-
+		/*
+		 * Publish ready under the DPMAIF state lock; a ready event that
+		 * waited for this is then handed over. The state leaves RESETTING
+		 * only where a reset restarts MEDMCU (RSTN_CLR), so a reset that
+		 * began meanwhile still holds the table back.
+		 */
+		spin_lock_irqsave(&medmcu_dpmaif_lock, flags);
 #if SCP_RECOVERY_SUPPORT
 		atomic_set(&scp_reset_status, RESET_STATUS_STOP);
 #endif
 		scp_ready[SCP_A_ID] = 1;
+		pended = pended_dpmaif_ready;
+		spin_unlock_irqrestore(&medmcu_dpmaif_lock, flags);
+
+#if (TEST_WITHOUT_CCCI == 0)
+		if (pended) {
+			mutex_lock(&medmcu_handover_mutex);
+			handle_dpmaif_ready(true);
+			mutex_unlock(&medmcu_handover_mutex);
+		}
+#endif
+
+		mutex_lock(&scp_A_notify_mutex);
 		pr_debug("[MEDMCU] notify blocking call\n");
 		blocking_notifier_call_chain(&scp_A_notifier_list
 			, SCP_EVENT_READY, NULL);
@@ -1463,6 +1588,7 @@ int reset_scp(int reset)
 		/* make sure scp is in idle state */
 		scp_reset_wait_timeout();
 	}
+	medmcu_dpmaif_set_state(MEDMCU_DPMAIF_RESETTING);
 
 	if (scp_enable[SCP_A_ID]) {
 		/* write scp reserved memory address/size to GRP1/GRP2
@@ -1474,11 +1600,13 @@ int reset_scp(int reset)
 			scp_mem_base_phys, scp_mem_size, 0, 0, 0, 0,
 			&ares);
 #endif
+		medmcu_restart_begin();
 		rst_time = (uint64_t)ktime_get();
 		arm_smccc_smc(MTK_SIP_KERNEL_MEDMCU_CONTROL,
 			MTK_SIP_MEDMCU_RSTN_CLR,
 			rst_time, 0, 0, 0, 0, 0,
 			&ares);
+		medmcu_restart_end();
 
 #if SCP_BOOT_TIME_OUT_MONITOR
 		scp_ready_timer[SCP_A_ID].expires = jiffies + SCP_READY_TIMEOUT;
@@ -2560,11 +2688,14 @@ static void scp_reset_flow(unsigned int scp_reset_type)
 		mutex_lock(&medmcu_resume_mutex);
 	}
 #endif
+	/* The acks below rest on the NO_TABLE published by medmcu_restart_end(). */
+	medmcu_restart_begin();
 	rst_time = (uint64_t)ktime_get();
 	arm_smccc_smc(MTK_SIP_KERNEL_MEDMCU_CONTROL,
 		MTK_SIP_MEDMCU_RSTN_CLR,
 		rst_time, 0, 0, 0, 0, 0,
 		&ares);
+	medmcu_restart_end();
 
 #if ENABLE_MEDMCU_SUSPEND_RESUME
 	atomic_set(&medmcu_resume_need_dpmaif_ready, 0);
@@ -2627,6 +2758,18 @@ static void scp_sys_reset_ws(struct work_struct *ws)
 
 	pr_notice("[MEDMCU] %s(): remain %d times\n", __func__, scp_reset_counts);
 	if (scp_reset_type == RESET_TYPE_MD_FORCE_STOP) {
+		/*
+		 * MEDMCU acknowledged the stop. Reset it as after a modem
+		 * exception before reporting the stop: left running in its
+		 * stopped state, its firmware does not take up the next
+		 * CCCI_DPMAIF_EVENT_READY (no downlink, then a watchdog reset
+		 * at the following stop). Reset, it starts from its initial
+		 * state, as after loading the driver.
+		 */
+		scp_ready[SCP_A_ID] = 0;
+		clear_medhw_logged();
+		scp_logger_init_set(0);
+		scp_reset_flow(scp_reset_type);
 		scp_extern_notify(SCP_EVENT_STOP_ACK);
 		return;
 	}
@@ -2693,6 +2836,13 @@ void scp_send_reset_wq(enum SCP_RESET_TYPE type)
 	scp_sys_reset_work.id = SCP_A_ID;
 	if (scp_reset_counts > 0) {
 		scp_reset_counts--;
+		/*
+		 * Every reset counts as in progress from here until MEDMCU is ready
+		 * again (scp_A_notify_ws()), so that a DPMAIF stop in between waits
+		 * for it instead of being acknowledged at once.
+		 */
+		atomic_set(&scp_reset_status, RESET_STATUS_START);
+		medmcu_dpmaif_set_state(MEDMCU_DPMAIF_RESETTING);
 		scp_schedule_reset_work(&scp_sys_reset_work);
 	}
 }

@@ -123,6 +123,22 @@ MODULE_PARM_DESC (disable_rx_pitnat_log, "disable rx_pitnat_log debugging");
 uint32_t msg_med_ccci[2]; //dummy msg for ipi usage
 static DEFINE_MUTEX(scp_A_notify_mutex);
 atomic_t med_mcu_ack_flag;
+/*
+ * Budget for the ack, counted after the stop notification returns; not a bound
+ * on the whole stop. Longer than MEDMCU's nominal watchdog path: after a
+ * watchdog it waits up to 30 s for its log (scp_wdt_reset_timeout) and up to
+ * 1 s for the core to halt before the reset that ends in SCP_EVENT_STOP_BY_WDT.
+ */
+#define DPMAIF_MED_STOP_ACK_TIMEOUT_MS 40000
+/*
+ * Set when MEDMCU did not confirm a stop in time: it may still access the
+ * hardware, so the final hardware reset and clock gating are skipped and DPMAIF
+ * is not started again until the next boot. Readable as the stop_fault module
+ * parameter.
+ */
+static bool dpmaif_stop_fault;
+module_param_named(stop_fault, dpmaif_stop_fault, bool, 0444);
+MODULE_PARM_DESC(stop_fault, "an unconfirmed MEDMCU stop left the data path unusable until reboot");
 struct wakeup_source *push_wakelock;
 struct wakeup_source *transmit_wakelock;
 struct wakeup_source *transmit_wakelock_timer;
@@ -3043,6 +3059,17 @@ static int apsync_event( struct notifier_block *this,
 			CCCI_NORMAL_LOG(-1, TAG, "medmcu notified\n");
 			atomic_set(&med_mcu_ack_flag, 1);
 			break;
+		case SCP_EVENT_STOP_BY_WDT:
+			/*
+			 * MEDMCU sends this after its watchdog reset at the same point
+			 * of scp_reset_flow() as SCP_EVENT_STOP_ACK after a modem
+			 * exception: the core was halted (or waited for), held in
+			 * reset, fully reset and restarted from its initial state.
+			 * It is as much a stop ack as that one.
+			 */
+			CCCI_NORMAL_LOG(-1, TAG, "medmcu reset by watchdog\n");
+			atomic_set(&med_mcu_ack_flag, 1);
+			break;
 	}
 	return NOTIFY_DONE;
 }
@@ -4721,6 +4748,11 @@ int dpmaif_start(unsigned char hif_id)
 #endif
 	unsigned int reg_value = 0;
 
+	if (dpmaif_stop_fault) {
+		CCCI_ERROR_LOG(-1, TAG,
+			"dpmaif: not started: an earlier stop was not confirmed by medmcu, reboot to use the modem\n");
+		return -EIO;
+	}
 	if (dpmaif_ctrl->dpmaif_state == HIFDPMAIF_STATE_PWRON)
 		return 0;
 	else if (dpmaif_ctrl->dpmaif_state == HIFDPMAIF_STATE_MIN) {
@@ -5490,12 +5522,24 @@ int dpmaif_stop(unsigned char hif_id)
 	ccci_dpmaif_notify(CCCI_DPMAIF_EVENT_STOP);
 	CCCI_NORMAL_LOG(-1, TAG, "dpmaif:waiting medmcu ack\n");
 
-	/*b. try to receive ack. Before receiving ack, use a while loop to block here*/
-	while (1) {
-		if (atomic_read(&med_mcu_ack_flag) == 1) {
-			break;
+	/*
+	 * b. wait for the ack. Bounded: without a reply the FSM thread would block in here for good and no later
+	 * modem start could be processed. Without an ack MEDMCU may still access the hardware, so the final reset
+	 * and clock gating below are skipped, and DPMAIF stays unavailable until reboot (dpmaif_stop_fault).
+	 */
+	{
+		unsigned long deadline = jiffies + msecs_to_jiffies(DPMAIF_MED_STOP_ACK_TIMEOUT_MS);
+
+		while (atomic_read(&med_mcu_ack_flag) != 1) {
+			if (time_after(jiffies, deadline)) {
+				dpmaif_stop_fault = true;
+				CCCI_ERROR_LOG(-1, TAG,
+					"dpmaif: no medmcu stop ack in %d ms; final hw reset skipped, modem data unavailable until reboot\n",
+					DPMAIF_MED_STOP_ACK_TIMEOUT_MS);
+				return -ETIMEDOUT;
+			}
+			msleep(1);
 		}
-		msleep(1);
 	}
 	atomic_set(&med_mcu_ack_flag, 0);
 	CCCI_NORMAL_LOG(-1, TAG, "dpmaif:medmcu acked\n");
