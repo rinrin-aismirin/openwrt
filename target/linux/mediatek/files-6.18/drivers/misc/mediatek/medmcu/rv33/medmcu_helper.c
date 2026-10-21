@@ -352,6 +352,11 @@ struct medmcu_desc_info_t *get_desc_info(void)
 }
 EXPORT_SYMBOL_GPL(get_desc_info);
 
+static void *medmcu_desc_info_for_ccci(void)
+{
+	return get_desc_info();
+}
+
 void __iomem *get_medhw_base(void)
 {
 	return g_medmcu.medhw_base;
@@ -843,6 +848,8 @@ EXPORT_SYMBOL_GPL(release_scp_semaphore);
 
 #if (TEST_WITHOUT_CCCI == 0)
 extern void ccci_dpmaif_register_notify(struct notifier_block *nb);
+extern void ccci_scp_set_register(void (*fn)(struct notifier_block *nb));
+extern void ccci_set_medmcu_desc_info(void *(*fn)(void));
 
 static void handle_dpmaif_ready(void)
 {
@@ -3386,10 +3393,6 @@ static int __init medmcu_init(void)
 					 &msg_query_suspend_response);
 #endif /* ENABLE_MEDMCU_SUSPEND_RESUME */
 
-#if (TEST_WITHOUT_CCCI == 0)
-	ccci_dpmaif_register_notify(&ccci_apsync_notifier);
-#endif
-
 	ret = register_pm_notifier(&scp_pm_notifier_block);
 	if (ret)
 		pr_err("[MEDMCU] failed to register PM notifier %d\n", ret);
@@ -3424,6 +3427,17 @@ static int __init medmcu_init(void)
 
 	register_syscore(&scp_ipi_dbg_syscore_ops_syscore);
 
+#if (TEST_WITHOUT_CCCI == 0)
+	/*
+	 * Hand MEDMCU over to CCCI and DPMAIF only now that nothing above can
+	 * fail; let CCCI register its MEDMCU notifiers (see
+	 * ccci_scp_register_notify()).
+	 */
+	ccci_dpmaif_register_notify(&ccci_apsync_notifier);
+	ccci_scp_set_register(scp_A_register_notify);
+	ccci_set_medmcu_desc_info(medmcu_desc_info_for_ccci);
+#endif
+
 	driver_init_done = true;
 
 	reset_scp(SCP_ALL_ENABLE);
@@ -3437,49 +3451,22 @@ static int __init medmcu_init(void)
 	return ret;
 
 err:
-	return -1;
+	/*
+	 * The steps above register a platform driver, IPI handlers, a PM
+	 * notifier and workqueues that are not unwound. Stay loaded so that
+	 * nothing points into freed module memory; MEDMCU is not handed over to
+	 * CCCI and DPMAIF, so dpmaif_start() fails cleanly.
+	 */
+	pr_err("[MEDMCU] init failed, MEDMCU stays unavailable\n");
+	return 0;
 }
 
 /*
- * driver exit point
+ * No module_exit: neither the vendor exit path nor the init above unwinds
+ * the IPI handlers, platform driver, syscore ops and notifiers it registers,
+ * and CCCI and DPMAIF keep pointers to MEDMCU's functions and descriptor
+ * table. The module stays loaded until reboot.
  */
-static void __exit medmcu_exit(void)
-{
-#if SCP_BOOT_TIME_OUT_MONITOR
-	int i = 0;
-#endif
-
-#if SCP_LOGGER_ENABLE
-	scp_logger_uninit();
-#endif
-
-	free_irq(scpreg.irq, NULL);
-	misc_deregister(&scp_device);
-
-	flush_workqueue(scp_workqueue);
-	destroy_workqueue(scp_workqueue);
-
-#if SCP_RECOVERY_SUPPORT
-	flush_workqueue(scp_reset_workqueue);
-	destroy_workqueue(scp_reset_workqueue);
-	flush_workqueue(scp_delay_reset_workqueue);
-	destroy_workqueue(scp_delay_reset_workqueue);
-#endif
-
-#if SCP_LOGGER_ENABLE
-	flush_workqueue(scp_logger_workqueue);
-	destroy_workqueue(scp_logger_workqueue);
-#endif
-
-#if SCP_BOOT_TIME_OUT_MONITOR
-	for (i = 0; i < SCP_CORE_TOTAL ; i++)
-		del_timer(&scp_ready_timer[i]);
-#endif
-
-	iounmap(g_medmcu.medhw_base);
-
-	iounmap(g_medmcu.fe_base);
-}
 
 /*
  * MT6990 MEDMCU programs the MDMA rings in the shared frame-engine block.
@@ -3487,7 +3474,6 @@ static void __exit medmcu_exit(void)
  * clears RX_BASE_PTR/MAX_CNT and the MED firmware waits forever for MDMA.
  */
 late_initcall_sync(medmcu_init);
-module_exit(medmcu_exit);
 
 MODULE_DESCRIPTION("MEDIATEK Module MEDMCU driver");
 MODULE_AUTHOR("Mediatek");

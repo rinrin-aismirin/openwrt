@@ -53,6 +53,7 @@ static void fsm_finish_event(struct ccci_fsm_ctl *ctl,
 
 #if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 extern void scp_A_register_notify(struct notifier_block *nb);
+void ccci_scp_register_notify(struct notifier_block *nb);
 
 static int medsync_event( struct notifier_block *this,
 	unsigned long event, void *ptr);
@@ -1176,11 +1177,64 @@ int ccci_fsm_init(int md_id)
 #if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 	// register MED notify for MDE exception
 	CCCI_NORMAL_LOG(-1, FSM, "ccci_fsm: reg scp_A_register_notify\n");
-	scp_A_register_notify(&apsync_notifier);
+	ccci_scp_register_notify(&apsync_notifier);
 #endif
 
 	return 0;
 }
+
+/*
+ * MEDMCU (SCP A) notifier registration without a link-time dependency on the
+ * MEDMCU driver: as modules, MEDMCU needs symbols from this module and DPMAIF,
+ * while both register notifiers with MEDMCU, which makes a load cycle. Callers
+ * here queue their notifier until MEDMCU hands over its register function;
+ * scp_A_register_notify() replays SCP_EVENT_READY if the SCP is already up.
+ */
+static DEFINE_MUTEX(ccci_scp_notify_lock);
+static void (*ccci_scp_register_fn)(struct notifier_block *nb);
+static struct notifier_block *ccci_scp_pending_nb[4];
+static unsigned int ccci_scp_pending_num;
+
+void ccci_scp_register_notify(struct notifier_block *nb)
+{
+	mutex_lock(&ccci_scp_notify_lock);
+	if (ccci_scp_register_fn)
+		ccci_scp_register_fn(nb);
+	else if (!WARN_ON(ccci_scp_pending_num >= ARRAY_SIZE(ccci_scp_pending_nb)))
+		ccci_scp_pending_nb[ccci_scp_pending_num++] = nb;
+	mutex_unlock(&ccci_scp_notify_lock);
+}
+EXPORT_SYMBOL(ccci_scp_register_notify);
+
+void ccci_scp_set_register(void (*fn)(struct notifier_block *nb))
+{
+	unsigned int i;
+
+	mutex_lock(&ccci_scp_notify_lock);
+	ccci_scp_register_fn = fn;
+	for (i = 0; i < ccci_scp_pending_num; i++)
+		fn(ccci_scp_pending_nb[i]);
+	ccci_scp_pending_num = 0;
+	mutex_unlock(&ccci_scp_notify_lock);
+}
+EXPORT_SYMBOL(ccci_scp_set_register);
+
+/* Same for the MEDMCU descriptor table that DPMAIF reads in dpmaif_start(). */
+static void *(*ccci_medmcu_desc_fn)(void);
+
+void ccci_set_medmcu_desc_info(void *(*fn)(void))
+{
+	WRITE_ONCE(ccci_medmcu_desc_fn, fn);
+}
+EXPORT_SYMBOL(ccci_set_medmcu_desc_info);
+
+void *ccci_get_medmcu_desc_info(void)
+{
+	void *(*fn)(void) = READ_ONCE(ccci_medmcu_desc_fn);
+
+	return fn ? fn() : NULL;
+}
+EXPORT_SYMBOL(ccci_get_medmcu_desc_info);
 
 enum MD_STATE ccci_fsm_get_md_state(int md_id)
 {

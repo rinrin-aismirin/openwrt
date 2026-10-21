@@ -2059,12 +2059,8 @@ static int __init ccci_hif_ccif_init(void)
 	return 0;
 }
 
-static void __exit ccci_hif_ccif_exit(void)
-{
-}
-
+/* No module_exit: nothing the driver registers is unregistered (see ccci_hif_dpmaif.c). */
 module_init(ccci_hif_ccif_init);
-module_exit(ccci_hif_ccif_exit);
 
 MODULE_AUTHOR("ccci");
 MODULE_DESCRIPTION("ccci hif ccif driver");

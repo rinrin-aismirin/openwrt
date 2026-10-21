@@ -3032,7 +3032,7 @@ void ccci_dpmaif_unregister_notify(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(ccci_dpmaif_unregister_notify);
 
-extern void scp_A_register_notify(struct notifier_block *nb);
+extern void ccci_scp_register_notify(struct notifier_block *nb);
 
 static int apsync_event( struct notifier_block *this,
 	unsigned long event, void *ptr)
@@ -4679,10 +4679,15 @@ static void ccci_hif_dpmaif_set_clk(unsigned int on)
 }
 
 #if defined(_DPMAIF_MED_SUPPORT_)
-extern struct medmcu_desc_info_t *get_desc_info(void);
-static void dpmaif_set_addr_and_size_from_medmcu(void)
+extern void *ccci_get_medmcu_desc_info(void);
+static int dpmaif_set_addr_and_size_from_medmcu(void)
 {
-	struct medmcu_desc_info_t *desc = get_desc_info();
+	struct medmcu_desc_info_t *desc = ccci_get_medmcu_desc_info();
+
+	if (!desc) {
+		CCCI_ERROR_LOG(-1, TAG, "MEDMCU descriptors not available (driver not loaded?)\n");
+		return -ENODEV;
+	}
 
 	gMedmcuPitNatPhyBase = desc[PIT_NAT].phy_base;
 	gMedmcuPitNatSize = desc[PIT_NAT].sz;
@@ -4700,6 +4705,7 @@ static void dpmaif_set_addr_and_size_from_medmcu(void)
 	gMedmcuDrb5PhyBase = desc[DRB2].phy_base;
 	gMedmcuDrb5Size = desc[DRB2].sz;
 #endif
+	return 0;
 }
 #endif
 
@@ -4719,7 +4725,9 @@ int dpmaif_start(unsigned char hif_id)
 		return 0;
 	else if (dpmaif_ctrl->dpmaif_state == HIFDPMAIF_STATE_MIN) {
 #if defined(_DPMAIF_MED_SUPPORT_)
-		dpmaif_set_addr_and_size_from_medmcu();
+		ret = dpmaif_set_addr_and_size_from_medmcu();
+		if (ret < 0)
+			return ret;
 #endif
 		ret = dpmaif_late_init(hif_id);
 		if (ret < 0)
@@ -5970,7 +5978,7 @@ int ccci_dpmaif_hif_init(struct device *dev)
 	#if defined(_DPMAIF_MED_SUPPORT_) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 	/*register MEDMCU notify*/
 	CCCI_NORMAL_LOG(-1, TAG, "dpmaif: scp_A_register_notify\n");
-	scp_A_register_notify(&apsync_notifier);
+	ccci_scp_register_notify(&apsync_notifier);
 
 	dpmaif_ctrl->rx_wakelock = wakeup_source_register(NULL, "ccci_data");
 	if (!dpmaif_ctrl->rx_wakelock) {
@@ -6067,12 +6075,12 @@ static int __init ccci_hif_dpmaif_init(void)
 	return 0;
 }
 
-static void __exit ccci_hif_dpmaif_exit(void)
-{
-}
-
+/*
+ * No module_exit: the driver registers a platform driver, syscore ops and
+ * notifiers in other modules that it never unregisters, so it stays loaded
+ * until reboot.
+ */
 module_init(ccci_hif_dpmaif_init);
-module_exit(ccci_hif_dpmaif_exit);
 
 MODULE_AUTHOR("ccci");
 MODULE_DESCRIPTION("ccci hif dpmaif driver");
