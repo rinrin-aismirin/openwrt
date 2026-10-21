@@ -1298,7 +1298,7 @@ static int md_ccif_exp_ring_buf_init(struct md_ccif_ctrl *md_ctrl)
 
 	ccism = ccci_md_get_smem_by_user_id(md_ctrl->md_id,
 		SMEM_USER_CCISM_MCU_EXP);
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	if (ccism->size)
 		memset_io(ccism->base_ap_view_vir, 0, ccism->size);
 #endif
@@ -1310,7 +1310,7 @@ static int md_ccif_exp_ring_buf_init(struct md_ccif_ctrl *md_ctrl)
 		bufsize = CCCI_RINGBUF_CTL_LEN +
 			rx_exp_buffer_size_up_95[i]
 			+ tx_exp_buffer_size_up_95[i];
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 		ringbuf =
 			ccci_create_ringbuf(md_ctrl->md_id, buf, bufsize,
 			rx_exp_buffer_size_up_95[i],
@@ -1347,7 +1347,7 @@ int md_ccif_ring_buf_init(unsigned char hif_id)
 	md_ctrl = (struct md_ccif_ctrl *)ccci_hif_get_by_id(hif_id);
 	ccism = ccci_md_get_smem_by_user_id(md_ctrl->md_id,
 		SMEM_USER_CCISM_MCU);
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	if (ccism->size)
 		memset_io(ccism->base_ap_view_vir, 0, ccism->size);
 #endif
@@ -1366,7 +1366,7 @@ int md_ccif_ring_buf_init(unsigned char hif_id)
 				ccism->size);
 			return -1;
 		}
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 		ringbuf =
 		    ccci_create_ringbuf(md_ctrl->md_id, buf, bufsize,
 				rx_queue_buffer_size_up_95[i],
@@ -1544,7 +1544,7 @@ static int ccif_late_init(unsigned char hif_id)
 
 	md_ccif_ring_buf_init(CCIF_HIF_ID);
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	unsigned int ch_id, i;
 	/*disable_irq_nosync(md_ctrl->ccif_irq_id); */
 	/*must ack first, otherwise IRQ will rush in */
@@ -1666,7 +1666,7 @@ static int ccif_start(unsigned char hif_id)
 	if (ccif_ctrl->ccif_state == HIFCCIF_STATE_MIN)
 		ccif_late_init(hif_id);
 
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	md_ccif_sram_reset(CCIF_HIF_ID);
 #else
 	CCCI_NORMAL_LOG(ccif_ctrl->md_id, TAG, "skip md_ccif_sram_reset\n");
@@ -1674,7 +1674,7 @@ static int ccif_start(unsigned char hif_id)
 
 	md_ccif_switch_ringbuf(CCIF_HIF_ID, RB_EXP);
 
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	md_ccif_reset_queue(CCIF_HIF_ID, 1);
 #else
 	CCCI_NORMAL_LOG(ccif_ctrl->md_id, TAG, "skip md_ccif_reset_queue EXP\n");
@@ -1682,14 +1682,14 @@ static int ccif_start(unsigned char hif_id)
 
 	md_ccif_switch_ringbuf(CCIF_HIF_ID, RB_NORMAL);
 
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	md_ccif_reset_queue(CCIF_HIF_ID, 1);
 #else
 	CCCI_NORMAL_LOG(ccif_ctrl->md_id, TAG, "skip md_ccif_reset_queue NORMAL\n");
 #endif
 
 	/* clear all ccif irq before enable it.*/
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	ccci_reset_ccif_hw(ccif_ctrl->md_id, AP_MD1_CCIF,
 		ccif_ctrl->ccif_ap_base,
 		ccif_ctrl->ccif_md_base, ccif_ctrl);
@@ -1873,7 +1873,7 @@ static int ccif_hif_hw_init(struct device *dev, struct md_ccif_ctrl *md_ctrl)
 		md_ctrl->ccif_md_base);
 	CCCI_DEBUG_LOG(-1, TAG, "ccif_irq0:%d,ccif_irq1:%d\n",
 		md_ctrl->ap_ccif_irq0_id, md_ctrl->ap_ccif_irq1_id);
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	ret = request_irq(md_ctrl->ap_ccif_irq0_id, md_ccif_isr,
 			md_ctrl->ap_ccif_irq0_flags, "CCIF_AP_DATA", md_ctrl);
 	if (ret) {

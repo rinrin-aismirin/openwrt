@@ -907,9 +907,24 @@ void hsapif_cldma_sysresume(void)
 #endif
 }
 
-static struct syscore_ops hsapif_sysops = {
-        .suspend = hsapif_cldma_syssuspend,
-        .resume = hsapif_cldma_sysresume,
+/* Linux 6.18: syscore callbacks take a data pointer and are registered via struct syscore. */
+static int hsapif_sysops_suspend(void *data)
+{
+	return hsapif_cldma_syssuspend();
+}
+
+static void hsapif_sysops_resume(void *data)
+{
+	hsapif_cldma_sysresume();
+}
+
+static const struct syscore_ops hsapif_sysops = {
+	.suspend = hsapif_sysops_suspend,
+	.resume = hsapif_sysops_resume,
+};
+
+static struct syscore hsapif_sysops_syscore = {
+	.ops = &hsapif_sysops,
 };
 
 void hsapif_obtain_wakelock(void) {
@@ -1024,7 +1039,7 @@ static int cldma_hif_init(struct ccci_md_cd_ctrl *md_ctrl)
 #endif
 
 	/* register SYS CORE suspend resume call back */
-	register_syscore_ops(&hsapif_sysops);
+	register_syscore(&hsapif_sysops_syscore);
 
 	md_ctrl->tx_busy_warn_cnt = 0;
 

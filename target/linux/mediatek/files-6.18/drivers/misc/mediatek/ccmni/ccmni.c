@@ -69,7 +69,7 @@ static long ccmni_dev_rx_dropped(struct net_device *dev)
 #include <mt-plat/met_drv.h>
 #endif
 
-#if defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 #include "medmcu_common.h"
 void __iomem *med_base;
 #define MTK_MED_BASE			(0x15B38000)
@@ -84,7 +84,7 @@ struct MED_HNAT_INFO_HOST *med_info_base = NULL;
 extern struct medmcu_desc_info_t *get_desc_info(void);
 #endif
 
-#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 #include "mtk_ppe.h"
 #include <linux/sysctl.h> /* LG6851F Stage5J: register_sysctl */
 #include <linux/if_vlan.h> /* LG6851F Stage5J: VLAN declarations */
@@ -128,6 +128,15 @@ struct eth_pdu_info_t get_eth_pdu_info(void)
 EXPORT_SYMBOL(get_eth_pdu_info);
 
 static unsigned long timeout_flush_num, clear_flush_num;
+
+/* eth_header_ops is not exported; same callbacks, usable from a module. */
+static const struct header_ops ccmni_eth_header_ops = {
+	.create		= eth_header,
+	.parse		= eth_header_parse,
+	.cache		= eth_header_cache,
+	.cache_update	= eth_header_cache_update,
+	.parse_protocol	= eth_header_parse_protocol,
+};
 
 // enable by echo 1 > /sys/module/ccmni/parameters/ccmni_gro
 static DEFINE_MUTEX(ccmni_gro_lock);
@@ -175,7 +184,7 @@ static struct ctl_table tcp_pacing_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 	},
-	{}
+	/* No empty sentinel: register_sysctl() takes the entry count from ARRAY_SIZE(). */
 };
 /* LG6851F Stage5J: removed legacy nested sysctl wrapper tcp_pacing_sysctl_root; path is supplied to register_sysctl(). */
 
@@ -919,7 +928,18 @@ EXPORT_SYMBOL(ccmni_clr_flush_timer);
  */
 static void napi_gro_list_flush(struct ccmni_instance *ccmni)
 {
-	gro_flush_normal(&ccmni->napi->gro, false);
+	struct gro_node *gro = &ccmni->napi->gro;
+
+	/*
+	 * Same as gro_flush_normal(), but hands the GRO_NORMAL list over with
+	 * the exported netif_receive_skb_list(), so this also builds as a module.
+	 */
+	gro_flush(gro, false);
+	if (!gro->rx_count)
+		return;
+	netif_receive_skb_list(&gro->rx_list);
+	INIT_LIST_HEAD(&gro->rx_list);
+	gro->rx_count = 0;
 }
 
 static void ccmni_gro_flush(struct ccmni_instance *ccmni)
@@ -1825,7 +1845,7 @@ static int get_link_ksettings(struct net_device *dev,
 	return 0;
 }
 
-#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 static int ccmni_fill_forward_path(struct net_device_path_ctx *ctx,
 				       struct net_device_path *path)
 {
@@ -1885,7 +1905,7 @@ static const struct net_device_ops ccmni_netdev_ops = {
 	.ndo_select_queue = ccmni_select_queue,
 	.ndo_get_stats64 = ccmni_get_stats64,
 	.ndo_set_mac_address = eth_mac_addr,
-#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 	.ndo_fill_forward_path	= ccmni_fill_forward_path,
 	.ndo_fill_receive_path	= ccmni_fill_receive_path,
 	.ndo_setup_tc		= mtk_netdev_setup_tc,
@@ -2053,13 +2073,13 @@ static ssize_t ccmni_proc_bridge_write(struct file *file,
 			dev = ccmni->dev;
 			if (br_mode) {
 				dev->hard_header_len = ETH_HLEN;
-				dev->header_ops = &eth_header_ops;
+				dev->header_ops = &ccmni_eth_header_ops;
 				dev->flags = dev->flags | IFF_NOARP | IFF_BROADCAST | IFF_MULTICAST;
 				dev->type = ARPHRD_ETHER;
 				dev->needed_headroom = sizeof(struct ccci_header);
 			} else if (ccmni->index == eth_pdu_info.eth_id && eth_pdu_info.eth_mode) {  //EthPDU
 				dev->hard_header_len = ETH_HLEN;
-				dev->header_ops = &eth_header_ops;
+				dev->header_ops = &ccmni_eth_header_ops;
 				dev->flags = (dev->flags & ~IFF_NOARP) | IFF_BROADCAST | IFF_MULTICAST;
 				dev->type = ARPHRD_ETHER;
 				dev->needed_headroom = sizeof(struct ccci_header);
@@ -2146,13 +2166,13 @@ static ssize_t ccmni_proc_eth_write(struct file *file,
 			dev = ccmni->dev;
 			if (br_mode) {
 				dev->hard_header_len = ETH_HLEN;
-				dev->header_ops = &eth_header_ops;
+				dev->header_ops = &ccmni_eth_header_ops;
 				dev->flags = dev->flags | IFF_NOARP | IFF_BROADCAST | IFF_MULTICAST;
 				dev->type = ARPHRD_ETHER;
 				dev->needed_headroom = sizeof(struct ccci_header);
 			} else if (ccmni->index == eth_pdu_info.eth_id && eth_pdu_info.eth_mode) {  //EthPDU
 				dev->hard_header_len = ETH_HLEN;
-				dev->header_ops = &eth_header_ops;
+				dev->header_ops = &ccmni_eth_header_ops;
 				dev->flags = (dev->flags & ~IFF_NOARP) | IFF_BROADCAST | IFF_MULTICAST;
 				dev->type = ARPHRD_ETHER;
 				dev->needed_headroom = sizeof(struct ccci_header);
@@ -2495,7 +2515,7 @@ static int ccmni_init(int md_id, struct ccmni_ccci_ops *ccci_info)
 		return -EINVAL;
 	}
 
-#if defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 	CCMNI_INF_MSG(0, "%s: init med_base\n", __func__);
 	med_base = ioremap(MTK_MED_BASE, MTK_FE_RANGE);
 #endif
@@ -2589,13 +2609,13 @@ static int ccmni_init(int md_id, struct ccmni_ccci_ops *ccci_info)
 		*/
 		if (br_mode) {
 			dev->hard_header_len = ETH_HLEN;
-			dev->header_ops = &eth_header_ops;
+			dev->header_ops = &ccmni_eth_header_ops;
 			dev->flags = dev->flags | IFF_NOARP | IFF_BROADCAST | IFF_MULTICAST;
 			dev->type = ARPHRD_ETHER;
 			dev->needed_headroom = sizeof(struct ccci_header);
 		} else if (ccmni->index == eth_pdu_info.eth_id && eth_pdu_info.eth_mode) {  //EthPDU
 			dev->hard_header_len = ETH_HLEN;
-			dev->header_ops = &eth_header_ops;
+			dev->header_ops = &ccmni_eth_header_ops;
 			dev->flags = (dev->flags & ~IFF_NOARP) | IFF_BROADCAST | IFF_MULTICAST;
 			dev->type = ARPHRD_ETHER;
 			dev->needed_headroom = sizeof(struct ccci_header);
@@ -2767,7 +2787,7 @@ ccmni_exit_ret:
 struct timespec64 starttime_ccmni_rx;
 static unsigned long long rec_data_len;
 
-#if defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 void ccmni_recycle_med_hnat_info(void)
 {
 	int count = 0;
@@ -2787,7 +2807,7 @@ void ccmni_recycle_med_hnat_info(void)
 EXPORT_SYMBOL(ccmni_recycle_med_hnat_info);
 #endif
 
-#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 void ccmni_set_ppe_rx_info(struct sk_buff *skb, u8 drop, u8 channel)
 {
 	struct MED_HNAT_INFO_HOST *med_dmad;

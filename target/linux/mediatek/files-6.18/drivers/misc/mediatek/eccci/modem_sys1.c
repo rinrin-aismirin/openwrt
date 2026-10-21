@@ -356,13 +356,13 @@ static int md_cd_start(struct ccci_modem *md)
 		 * which is ready very late.
 		 */
 		ccci_init_security();
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 		ccci_md_clear_smem(md->index, 1);
 #else
 		CCCI_NORMAL_LOG(md->index, TAG, "skip MD ccci_md_clear_smem\n");
 #endif
 
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 		if (md->hw_info->plat_ptr->start_platform) {
 			ret = md->hw_info->plat_ptr->start_platform(md);
 			if (ret) {
@@ -395,7 +395,7 @@ static int md_cd_start(struct ccci_modem *md)
 	ccci_set_bsi_bpi_SRAM_cfg(md, 1, MD_FLIGHT_MODE_NONE);
 #endif
 	/* 4. power on modem, do NOT touch MD register before this */
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	if (md->hw_info->plat_ptr->power_on) {
 		ret = md->hw_info->plat_ptr->power_on(md);
 		if (ret) {
@@ -417,7 +417,7 @@ static int md_cd_start(struct ccci_modem *md)
 	md->per_md_data.md_dbg_dump_flag = MD_DBG_DUMP_AP_REG;
 
 	/* 7. let modem go */
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	if (md->hw_info->plat_ptr->let_md_go)
 		md->hw_info->plat_ptr->let_md_go(md);
 #else
@@ -1371,9 +1371,24 @@ void ccci_modem_sysresume(void)
 }
 
 
-static struct syscore_ops ccci_modem_sysops = {
-	.suspend = ccci_modem_syssuspend,
-	.resume = ccci_modem_sysresume,
+/* Linux 6.18: syscore callbacks take a data pointer and are registered via struct syscore. */
+static int ccci_modem_sysops_suspend(void *data)
+{
+	return ccci_modem_syssuspend();
+}
+
+static void ccci_modem_sysops_resume(void *data)
+{
+	ccci_modem_sysresume();
+}
+
+static const struct syscore_ops ccci_modem_sysops = {
+	.suspend = ccci_modem_sysops_suspend,
+	.resume = ccci_modem_sysops_resume,
+};
+
+static struct syscore ccci_modem_sysops_syscore = {
+	.ops = &ccci_modem_sysops,
 };
 
 /* LG6851F Stage5N: use the kernel DMA_BIT_MASK() definition. */
@@ -1428,14 +1443,14 @@ int ccci_modem_init_common(struct platform_device *plat_dev,
 		md->hif_flag = (1 << MD1_NET_HIF | 1 << MD1_NORMAL_HIF);
 
 	/* register SYS CORE suspend resume call back */
-	register_syscore_ops(&ccci_modem_sysops);
+	register_syscore(&ccci_modem_sysops_syscore);
 
 	/* add sysfs entries */
 	md_cd_sysfs_init(md);
 	/* hook up to device */
 	plat_dev->dev.platform_data = md;
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	ccci_fsm_ioctl(md->index, CCCI_IOC_DO_START_MD, NULL);
 	CCCI_NORMAL_LOG(md->index, TAG,
 		"%s: trigger CCCI_IOC_DO_START_MD internally\n", __func__);

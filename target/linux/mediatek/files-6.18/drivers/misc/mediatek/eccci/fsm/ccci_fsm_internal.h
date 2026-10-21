@@ -281,7 +281,7 @@ struct ccci_fsm_ctl *fsm_get_entity_by_md_id(int md_id);
 int fsm_monitor_send_message(int md_id, enum CCCI_MD_MSG msg, u32 resv);
 int fsm_ccism_init_ack_handler(int md_id, int data);
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 void fsm_reboot_handler(void);
 #endif
 void fsm_md_bootup_timeout_handler(struct ccci_fsm_ee *ee_ctl);

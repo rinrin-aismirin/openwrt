@@ -1199,7 +1199,7 @@ int port_user_register(struct port_t *port)
 		proxy_set_critical_user(proxy_p, CRIT_USR_FS, 1);
 	if (rx_ch == CCCI_UART2_RX)
 		proxy_set_critical_user(proxy_p, CRIT_USR_MUXD, 1);
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	if (rx_ch == CCCI_MD_LOG_RX || (rx_ch == CCCI_SMEM_CH &&
 		strcmp(port->name, "ccci_ccb_dhl") == 0))
 		proxy_set_critical_user(proxy_p, CRIT_USR_MDLOG, 1);
@@ -1227,7 +1227,7 @@ int port_user_unregister(struct port_t *port)
 		proxy_set_critical_user(proxy_p, CRIT_USR_FS, 0);
 	if (rx_ch == CCCI_UART2_RX)
 		proxy_set_critical_user(proxy_p, CRIT_USR_MUXD, 0);
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	if (rx_ch == CCCI_MD_LOG_RX || (rx_ch == CCCI_SMEM_CH &&
 		strcmp(port->name, "ccci_ccb_dhl") == 0))
 		proxy_set_critical_user(proxy_p, CRIT_USR_MDLOG, 0);

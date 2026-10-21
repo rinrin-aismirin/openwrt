@@ -3228,9 +3228,24 @@ static struct platform_driver mtk_medmcu_device = {
 	},
 };
 
-static struct syscore_ops scp_ipi_dbg_syscore_ops = {
-	.suspend = scp_ipi_syscore_dbg_suspend,
-	.resume = scp_ipi_syscore_dbg_resume,
+/* Linux 6.18: syscore callbacks take a data pointer and are registered via struct syscore. */
+static int scp_ipi_dbg_syscore_ops_suspend(void *data)
+{
+	return scp_ipi_syscore_dbg_suspend();
+}
+
+static void scp_ipi_dbg_syscore_ops_resume(void *data)
+{
+	scp_ipi_syscore_dbg_resume();
+}
+
+static const struct syscore_ops scp_ipi_dbg_syscore_ops = {
+	.suspend = scp_ipi_dbg_syscore_ops_suspend,
+	.resume = scp_ipi_dbg_syscore_ops_resume,
+};
+
+static struct syscore scp_ipi_dbg_syscore_ops_syscore = {
+	.ops = &scp_ipi_dbg_syscore_ops,
 };
 
 static int aee_parse_chosen(void)
@@ -3407,7 +3422,7 @@ static int __init medmcu_init(void)
 
 	scp_recovery_init();
 
-	register_syscore_ops(&scp_ipi_dbg_syscore_ops);
+	register_syscore(&scp_ipi_dbg_syscore_ops_syscore);
 
 	driver_init_done = true;
 

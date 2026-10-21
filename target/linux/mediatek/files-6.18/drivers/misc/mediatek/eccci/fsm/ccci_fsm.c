@@ -51,7 +51,7 @@ static void fsm_finish_command(struct ccci_fsm_ctl *ctl,
 static void fsm_finish_event(struct ccci_fsm_ctl *ctl,
 	struct ccci_fsm_event *event);
 
-#if defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 extern void scp_A_register_notify(struct notifier_block *nb);
 
 static int medsync_event( struct notifier_block *this,
@@ -326,7 +326,7 @@ static void fsm_routine_exception(struct ccci_fsm_ctl *ctl,
 		}
 		fsm_md_exception_stage(&ctl->ee_ctl, 2);
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
         /* reboot device if nested MDEE occurs during exception HS flow */
 		CCCI_ERROR_LOG(ctl->md_id, FSM, "ex_got = %u, rec_ok_got = %u, pass_got = %u\n",
 				ex_got, rec_ok_got, pass_got);
@@ -365,7 +365,7 @@ static void fsm_routine_start(struct ccci_fsm_ctl *ctl,
 	unsigned long flags;
 	int boot_timeout = BOOT_TIMEOUT;  /* 30*1000 */
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	if (is_host_fpga()) {
 		boot_timeout = 30*60*1000;
 	}
@@ -432,7 +432,7 @@ static void fsm_routine_start(struct ccci_fsm_ctl *ctl,
 				hs1_got = 1;
 				fsm_broadcast_state(ctl, BOOT_WAITING_FOR_HS2);
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 				CCCI_NORMAL_LOG(ctl->md_id, FSM,
 					"skip ccci_md_prepare_runtime_data\n");
 #else
@@ -460,7 +460,7 @@ static void fsm_routine_start(struct ccci_fsm_ctl *ctl,
 
 				spin_unlock_irqrestore(&ctl->event_lock, flags);
 				/* this API would alloc skb */
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 				CCCI_NORMAL_LOG(ctl->md_id, FSM,
 					"skip ccci_md_send_runtime_data\n");
 #else
@@ -735,7 +735,7 @@ static void fsm_routine_wdt(struct ccci_fsm_ctl *ctl,
 		CCCI_NORMAL_LOG(ctl->md_id, FSM,
 			"reset MD after WDT\n");
 		reset_md = 1;
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	} else if (is_reboot_set){
 		CCCI_NORMAL_LOG(ctl->md_id, FSM,
 				"system reboot after WDT and enter while 1\n");
@@ -1173,7 +1173,7 @@ int ccci_fsm_init(int md_id)
 #endif
 	ccci_fsm_entries[md_id] = ctl;
 
-#if defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 	// register MED notify for MDE exception
 	CCCI_NORMAL_LOG(-1, FSM, "ccci_fsm: reg scp_A_register_notify\n");
 	scp_A_register_notify(&apsync_notifier);
@@ -1298,7 +1298,7 @@ unsigned long ccci_get_md_boot_count(int md_id)
 		return 0;
 }
 
-#if defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 static int medsync_event( struct notifier_block *this,
 	unsigned long event, void *ptr)
 {
@@ -1319,7 +1319,7 @@ static int medsync_event( struct notifier_block *this,
 }
 #endif
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 void fsm_reboot_handler(void)
 {
 	if (is_force_no_reboot())

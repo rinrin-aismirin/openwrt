@@ -36,6 +36,9 @@ ccflags-y += -DCCCI_KMODULE_ENABLE
 ccflags-y += -I$(srctree)/drivers/misc/mediatek/eccci/hif
 ccflags-y += -I$(srctree)/drivers/misc/mediatek/eccci/udc/udc_lib_inc
 ccflags-y += -I$(srctree)/drivers/misc/mediatek/medmcu/include/
+# Include paths the subdirectory Makefiles add in the built-in case.
+ccflags-y += -I$(srctree)/drivers/misc/mediatek/medmcu/rv33/
+ccflags-y += -I$(srctree)/include/soc/mediatek/
 
 obj-$(CCCI_OBJ) += ccci_md_clk.o
 obj-$(CCCI_OBJ) += ccci_rtc.o
@@ -118,6 +121,7 @@ ccflags-y  += -DMTK_SEC_MODEM_NVRAM_ANTI_CLONE
 endif
 ccci_md_all-$(CCCI_OBJ) += platform/ccci_platform.o $(core_obj) $(mach_obj) $(sec_obj) \
 		platform/ap_md_reg_dump.o \
+		platform/ap_md_reg_dump_v1.o \
 		platform/md_sys1_platform.o
 # plat end
 

@@ -83,7 +83,7 @@ void fsm_md_bootup_timeout_handler(struct ccci_fsm_ee *ee_ctl)
 
 	ee_ctl->ops->dump_ee_info(ee_ctl, MDEE_DUMP_LEVEL_BOOT_FAIL, 0);
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	CCCI_NORMAL_LOG(ee_ctl->md_id, FSM,
 		"HS1 or HS2 timeout, proceed with reboot handler\n");
 	fsm_reboot_handler();

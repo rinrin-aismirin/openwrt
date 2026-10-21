@@ -56,3 +56,44 @@ define KernelPackage/phy-mediatek-2p5g/description
 endef
 
 $(eval $(call KernelPackage,phy-mediatek-2p5g))
+
+define KernelPackage/mt6990-modem
+  SUBMENU:=Other modules
+  TITLE:=MediaTek MT6990 modem (CCCI) drivers
+  DEPENDS:=@TARGET_mediatek_mt6990
+  KCONFIG:= \
+	CONFIG_MTK_CCCI_DEVICES=y \
+	CONFIG_MTK_ECCCI_DRIVER=m \
+	CONFIG_MTK_ECCCI_CCIF=m \
+	CONFIG_MTK_NET_CCMNI=m \
+	CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT=m \
+	CONFIG_MTK_TINYSYS_MEDMCU_RV33_SUPPORT=m \
+	CONFIG_MTK_MBOX=m \
+	CONFIG_RPMSG=m \
+	CONFIG_RPMSG_MTK=m \
+	CONFIG_MTK_IPI=m
+  FILES:= \
+	$(LINUX_DIR)/drivers/soc/mediatek/mtk-mbox.ko \
+	$(LINUX_DIR)/drivers/rpmsg/rpmsg_core.ko \
+	$(LINUX_DIR)/drivers/rpmsg/mtk_rpmsg_mbox.ko \
+	$(LINUX_DIR)/drivers/soc/mediatek/mtk_tinysys_ipi.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/ccci_util/ccci_util_lib.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/eccci/ccci_md_clk.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/eccci/ccci_rtc.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/eccci/ccci_auxadc.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/eccci/ccci_md_all.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/eccci/ccci_ccif.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/eccci/ccci_dpmaif.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/md_tx_power.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/ccmni/ccmni.ko \
+	$(LINUX_DIR)/drivers/misc/mediatek/medmcu/rv33/medmcu.ko
+endef
+
+define KernelPackage/mt6990-modem/description
+  Vendor CCCI, CCMNI, DPMAIF and MEDMCU drivers for the modem of the
+  MediaTek MT6990 (T830). The modules are not loaded at boot; the modem
+  service loads them when it is enabled. The modem also needs userspace
+  from the stock firmware, which is not part of OpenWrt.
+endef
+
+$(eval $(call KernelPackage,mt6990-modem))

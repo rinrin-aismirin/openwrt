@@ -601,7 +601,7 @@ static int parse_meta_boot_arguments(unsigned int *raw_ptr)
 	return 0;
 }
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 static struct ThinMdDhl s_dhl_misc_info;
 static void dhl_misc_info_parsing(void)
 {
@@ -1456,7 +1456,7 @@ static int __init collect_lk_boot_arguments(void)
 
 _common_process:
 	parse_option_setting_from_lk();
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	dhl_misc_info_parsing();
 	sar_idx_parsing();
 	exhs2_reboot_parsing();
@@ -1502,7 +1502,7 @@ _common_process:
 }
 
 /* functions will be called by external */
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 struct ThinMdDhl get_dhl_misc_info(void)
 {
 	return s_dhl_misc_info;

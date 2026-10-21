@@ -20,7 +20,7 @@
 #include "modem_sys.h"
 #include "md_sys1_platform.h"
 
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 extern unsigned int aee_off_fast_reboot_enable;
 #endif
 
@@ -515,7 +515,7 @@ long ccci_fsm_ioctl(int md_id, unsigned int cmd, unsigned long arg)
 					current->comm);
 		break;
 	case CCCI_IOC_SEND_RUNTIME_DATA:
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 		aee_off_fast_reboot_enable = 1;
 		CCCI_NORMAL_LOG(md_id, FSM, "set aee_off_fast_reboot_enable=%u\n", aee_off_fast_reboot_enable);
 #else
@@ -523,7 +523,7 @@ long ccci_fsm_ioctl(int md_id, unsigned int cmd, unsigned long arg)
 #endif
 		break;
 	case CCCI_IOC_DO_START_MD:
-#if defined(CONFIG_MTK_ECCCI_NO_MDINIT)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_NO_MDINIT)
 		ret = fsm_append_command(ctl, CCCI_COMMAND_START, 0);
 #else
 		/* add check whether the user call md start ioctl is valid */
@@ -540,7 +540,7 @@ long ccci_fsm_ioctl(int md_id, unsigned int cmd, unsigned long arg)
 #endif
 		break;
 	case CCCI_IOC_DO_STOP_MD:
-#if defined(CONFIG_MTK_ECCCI_NO_MDINIT)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_NO_MDINIT)
 		ret = fsm_append_command(ctl, CCCI_COMMAND_STOP, 0);
 #else
 		if (copy_from_user(&data, (void __user *)arg,

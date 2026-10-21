@@ -1089,7 +1089,7 @@ static int md_cd_power_on(struct ccci_modem *md)
 {
 	int ret = 0;
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	/* md_first_power_on set 1 */
 	md_cd_plat_val_ptr.md_first_power_on = 1;
 	CCCI_NORMAL_LOG(md->index, TAG, "set md_fist_power_on = 1\n", __func__);
@@ -1183,7 +1183,7 @@ static int md_cd_let_md_go(struct ccci_modem *md)
 	bootprof_log_boot("ungate Modem");
 	printk("ungate Modem\n");
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	/* config modem UART to loopback mode */
 	arm_smccc_smc(MTK_SIP_KERNEL_CCCI_CONTROL, MD_POWER_CONFIG,
 			MD_UART_LOOPBACK, 0, 0, 0, 0, 0, &res);

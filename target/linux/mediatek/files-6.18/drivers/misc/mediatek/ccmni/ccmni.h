@@ -85,7 +85,7 @@ struct dhcp_packet {
 #endif
 
 #define MAX_MTU                 3000
-#ifdef CONFIG_MTK_ETHERNET_PDU
+#if IS_ENABLED(CONFIG_MTK_ETHERNET_PDU)
 #define  CCMNI_MTU              1522
 #else
 #if defined(CONFIG_MTK_WAN_MTU_SIZE)
@@ -305,7 +305,7 @@ struct eth_pdu_info_t {
 extern struct eth_pdu_info_t get_eth_pdu_info(void);
 // EthPDU -
 
-#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 struct MED_HOST_INFO1_T {
 	unsigned int PPE_ENTRY:15;
 	unsigned int HOST:1;

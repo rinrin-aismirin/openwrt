@@ -16,7 +16,7 @@ extern struct port_ops sys_port_ops;
 extern struct port_ops poller_port_ops;
 extern struct port_ops ctl_port_ops;
 extern struct port_ops ipc_port_ops;
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 extern struct port_ops smem_port_ops;
 #endif
 extern struct port_ops ccci_udc_port_ops;

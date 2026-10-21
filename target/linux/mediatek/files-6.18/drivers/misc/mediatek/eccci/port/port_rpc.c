@@ -715,7 +715,7 @@ static void ccci_rpc_work_helper(struct port_t *port, struct rpc_pkt *pkt,
 	CCCI_DEBUG_LOG(md_id, RPC, "%s++ %d op_id=0x%X\n", __func__,
 		p_rpc_buf->para_num, p_rpc_buf->op_id);
 	tmp_data[0] = FS_NO_ERROR;
-#ifdef CONFIG_MTK_ECCCI_FLASHLESS
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	if (p_rpc_buf->op_id != IPC_RPC_GET_EINT_ATTR_OP &&
 			p_rpc_buf->op_id != IPC_RPC_GET_GPIO_ADC_OP &&
 			p_rpc_buf->op_id != IPC_RPC_USIM2NFC_OP &&
@@ -1283,7 +1283,7 @@ static void ccci_rpc_work_helper(struct port_t *port, struct rpc_pkt *pkt,
 			break;
 		}
 //TODO: Remove when new design with runtime data applies
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	case IPC_RPC_SAR_TABLE_IDX_QUERY_OP:
 		CCCI_NORMAL_LOG(md_id, RPC,
 		"IPC_RPC_SAR_TABLE_IDX_QUERY_OP customerization not support, return 0 directly\n");
@@ -1586,7 +1586,7 @@ static int port_rpc_recv_match(struct port_t *port, struct sk_buff *skb)
 
 		case IPC_RPC_QUERY_AP_SYS_PROPERTY:
 //TODO: Remove when new design with runtime data applies
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 		case IPC_RPC_SAR_TABLE_IDX_QUERY_OP:
 #endif
 		case IPC_RPC_AMMS_DRDI_CONTROL:  // AMMS_v3

@@ -30,7 +30,7 @@ ccflags-y += -I$(srctree)/drivers/misc/mediatek/rps/
 ifeq ($(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD), y)
 ccflags-y += -I$(srctree)/drivers/misc/mediatek/ppe/
 endif
-ifeq ($(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT), y)
+ifneq ($(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT),)
 ccflags-y += -I$(srctree)/drivers/misc/mediatek/medmcu/rv33/
 endif
 obj-$(CCCI_CCMNI_OBJ) += ccmni.o

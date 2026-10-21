@@ -19,7 +19,7 @@
 #include "port_proxy.h"
 #include "port_char.h"
 #include "ccci_modem.h"
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 #include "port_smem.h"
 #endif
 #include "ccci_fsm.h"

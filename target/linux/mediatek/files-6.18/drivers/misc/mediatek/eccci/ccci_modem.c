@@ -43,7 +43,7 @@ int amms_cma_free(phys_addr_t addr, unsigned long size);
 int md_cd_vcore_config(unsigned int md_id, unsigned int hold_req);
 
 struct ccci_modem *modem_sys[MAX_MD_NUM];
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 unsigned int aee_off_fast_reboot_enable;
 #endif
 
@@ -146,7 +146,7 @@ struct ccci_smem_region md1_6298_noncacheable_fat[] = {
 {SMEM_USER_RAW_FORCE_ASSERT,0,	1*1024,		0, },
 {SMEM_USER_LOW_POWER,		0,	512,		0, },
 {SMEM_USER_RAW_DBM,			0,	512,		0, }, //TBD
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 {SMEM_USER_RAW_CCB_CTRL,	0,	4*1024,			SMF_NCLR_FIRST, },
 {SMEM_USER_RAW_AUDIO,		0,	52*1024,		SMF_NCLR_FIRST, },
 #endif
@@ -218,7 +218,7 @@ struct ccci_smem_region md1_6298_cacheable[] = {
 {SMEM_USER_RAW_DHL,		0,	62*1024*1024,	0, },
 {SMEM_USER_RAW_MDM,		0,	62*1024*1024,	0, },
 {SMEM_USER_RAW_MD_CONSYS,		0, 256*1024, SMF_NCLR_FIRST, },
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 {SMEM_USER_RAW_USIP,		0, 384*1024, SMF_NCLR_FIRST, },
 #endif
 {SMEM_USER_MAX, },
@@ -1351,7 +1351,7 @@ static void config_ap_side_feature(struct ccci_modem *md,
 
 	md_feature->feature_set[CCISM_SHARE_MEMORY_EXP].support_mask
 		= CCCI_FEATURE_MUST_SUPPORT;
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	if ((md->index == MD_SYS1) && ((get_md_resv_phy_cap_size(MD_SYS1) > 0)
 		|| (get_md_resv_sib_size(MD_SYS1) > 0)))
 		md_feature->feature_set[MD_PHY_CAPTURE].support_mask
@@ -1410,7 +1410,7 @@ static void config_ap_side_feature(struct ccci_modem *md,
 	md_feature->feature_set[MISC_INFO_CLIB_TIME].support_mask
 		= CCCI_FEATURE_MUST_SUPPORT;
 
-#if defined(USIP_SHARE_MEMORY_FEATURE_ENABLE) && !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if defined(USIP_SHARE_MEMORY_FEATURE_ENABLE) && !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 		md_feature->feature_set[MD_USIP_SHARE_MEMORY].support_mask =
 			CCCI_FEATURE_OPTIONAL_SUPPORT;
 #else
@@ -1427,7 +1427,7 @@ static void config_ap_side_feature(struct ccci_modem *md,
 
 // AMMS_v3 @{
 	if (md->hw_info->plat_val->md_gen >= 6298)
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 		md_feature->feature_set[AMMS_DRDI_COPY].support_mask =
 			CCCI_FEATURE_MUST_SUPPORT;
 #else
@@ -1439,7 +1439,7 @@ static void config_ap_side_feature(struct ccci_modem *md,
 			CCCI_FEATURE_NOT_SUPPORT;
 // @}
 
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	md_feature->feature_set[MD_MEM_AP_VIEW_INF].support_mask =
 		CCCI_FEATURE_OPTIONAL_SUPPORT;
 #else
@@ -1448,7 +1448,7 @@ static void config_ap_side_feature(struct ccci_modem *md,
 #endif
 
 // colgin @{
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	md_feature->feature_set[SAP_MEMDUMP_SHARE_MEMORY].support_mask
 		= CCCI_FEATURE_MUST_SUPPORT;
 	md_feature->feature_set[SAP_EXCEPTION_RECORD_SHARE_MEMORY].support_mask
@@ -1467,7 +1467,7 @@ static void config_ap_side_feature(struct ccci_modem *md,
 		= CCCI_FEATURE_MUST_SUPPORT;
 	md_feature->feature_set[DPMF_USB_PATH_SHARE_MEMORY].support_mask
 		= CCCI_FEATURE_MUST_SUPPORT;
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	md_feature->feature_set[RUNTIME_SHARE_MEMORY_MIDR].support_mask
 		= CCCI_FEATURE_MUST_SUPPORT;
 #else
@@ -1475,7 +1475,7 @@ static void config_ap_side_feature(struct ccci_modem *md,
 		= CCCI_FEATURE_NOT_SUPPORT;
 #endif
 #if defined(CONFIG_MTK_AEE_FEATURE)
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	md_feature->feature_set[CCCI_DHL_MISC_INFO].support_mask =
 		CCCI_FEATURE_MUST_SUPPORT;
 #else
@@ -1485,7 +1485,7 @@ static void config_ap_side_feature(struct ccci_modem *md,
 		CCCI_FEATURE_MUST_SUPPORT;
 #endif
 	if (md->hw_info->plat_val->md_gen >= 6298)
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 		md_feature->feature_set[AEE_OFF_FAST_REBOOT].support_mask =
 			CCCI_FEATURE_MUST_SUPPORT;
 #else
@@ -1496,7 +1496,7 @@ static void config_ap_side_feature(struct ccci_modem *md,
 		md_feature->feature_set[AEE_OFF_FAST_REBOOT].support_mask =
 			CCCI_FEATURE_NOT_SUPPORT;
 #endif
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	md_feature->feature_set[SAR_IDX].support_mask =
 		CCCI_FEATURE_MUST_SUPPORT;
 	struct ThinMdDrdiRuntimeData drdi = get_drdi_rt_data();
@@ -1654,7 +1654,7 @@ int ccci_md_prepare_runtime_data(unsigned char md_id, unsigned char *data,
 	unsigned int random_seed = 0;
 	struct timespec64 t;
 #if defined(CONFIG_MTK_AEE_FEATURE)
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 	unsigned int aee_mode = 0;
 	struct aee_dhl_dump_config aee_config;
 	struct aee_off_fast_reboot_config fast_reboot_config;
@@ -1976,7 +1976,7 @@ int ccci_md_prepare_runtime_data(unsigned char md_id, unsigned char *data,
 				break;
 			// @}
 #if defined(CONFIG_MTK_AEE_FEATURE)
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 			case CCCI_DHL_MISC_INFO:
 				rt_feature.data_len =
 					sizeof(struct aee_dhl_dump_config);
@@ -2030,7 +2030,7 @@ int ccci_md_prepare_runtime_data(unsigned char md_id, unsigned char *data,
 				break;
 #endif
 #endif
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 			case SAR_IDX:
 				rt_feature.data_len =
 					sizeof(struct ccci_misc_info_element);

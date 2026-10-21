@@ -52,7 +52,7 @@
 #define DPMAIF_HW_CHK_PIT_NUM      (DPMAIF_HW_CHK_BAT_NUM*2)
 #define DPMAIF_HW_CHK_RB_PIT_NUM   64
 
-#ifdef CONFIG_MTK_ECCCI_DPMAIF_SHRINK_MEM_FEATURE
+#if IS_ENABLED(CONFIG_MTK_ECCCI_DPMAIF_SHRINK_MEM_FEATURE)
 #define DPMAIF_DL_BAT_ENTRY_SIZE  8192 /* <- 1024 <- 128 */
 #else
 #define DPMAIF_DL_BAT_ENTRY_SIZE  16384
@@ -595,7 +595,7 @@ int dpmaif_stop_tx(unsigned char hif_id);
 int dpmaif_stop(unsigned char hif_id);
 void dpmaif_stop_hw(void);
 void dpmaif_dump_reg(void);
-#if defined(_DPMAIF_MED_SUPPORT_) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(_DPMAIF_MED_SUPPORT_) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 void dpmaif_ipi_rx_request(int id, void *data, unsigned int len);
 void ccci_dpmaif_reset_pit_nat_indexes(void);
 void ccci_dpmaif_resend_ready(void);

@@ -747,7 +747,7 @@ int mtk_ccci_register_md_state_cb(
 			enum MD_STATE new_state));
 
 
-#if defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 struct ThinMdDhl {
     uint8_t aee_mini_dump_flag;
     uint8_t midr_dump_flag;

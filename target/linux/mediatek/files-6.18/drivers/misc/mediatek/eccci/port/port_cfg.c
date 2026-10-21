@@ -189,7 +189,7 @@ static struct port_t md1_ccci_ports[] = {
 		&rpc_port_ops, 21, "ccci_rpc",},
 	{CCCI_RPC_TX, CCCI_RPC_RX, 1, 1, 1, 1, MD1_NORMAL_HIF, 0,
 		&rpc_port_ops, 0xFF, "ccci_rpc_k",},
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 /* smem port */
 	{CCCI_CCB_CTRL, CCCI_CCB_CTRL, 0xFF, 0xFF, 0xFF, 0xFF,
 		MD1_NORMAL_HIF, PORT_F_WITH_CHAR_NODE,
@@ -213,7 +213,7 @@ static struct port_t md1_ccci_ports[] = {
 		CCIF_HIF_ID, PORT_F_WITH_CHAR_NODE,
 		&smem_port_ops, SMEM_USER_RAW_AUDIO, "ccci_raw_audio",},
 #endif
-#ifdef CONFIG_MTK_NET_CCMNI
+#if IS_ENABLED(CONFIG_MTK_NET_CCMNI)
 #ifndef DATA_PLANE_DPMAIF
 	{CCCI_CCMNI1_TX, CCCI_CCMNI1_RX, DATA_TX_Q, DATA_RX_Q,
 		0xF0 | DATA_TX_ACK_Q, 0xFF, MD1_NORMAL_HIF, 0,
@@ -501,7 +501,7 @@ static struct port_t md3_ccci_ports[] = {
 		PORT_F_WITH_CHAR_NODE, &ctl_port_ops, 0, "ccci3_ctrl",},
 	{CCCI_STATUS_TX, CCCI_STATUS_RX, 0, 0, 0, 0, CCIF_HIF_ID,
 		PORT_F_WITH_CHAR_NODE, &poller_port_ops, 0, "ccci3_poll",},
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 /* smem port */
 	{CCCI_SMEM_CH, CCCI_SMEM_CH, 0xFF, 0xFF, 0xFF, 0xFF,
 		CCIF_HIF_ID, 0, &smem_port_ops, SMEM_USER_RAW_DBM,

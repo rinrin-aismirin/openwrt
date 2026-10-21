@@ -58,7 +58,7 @@
 #endif
 /* Data packets originate from or are destined for DPMAIF */
 #define DATA_PLANE_DPMAIF
-#ifdef CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT
+#if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 #define _DPMAIF_MED_SUPPORT_
 #endif
 //#ifdef CONFIG_MTK_TINYSYS_SCP_SUPPORT

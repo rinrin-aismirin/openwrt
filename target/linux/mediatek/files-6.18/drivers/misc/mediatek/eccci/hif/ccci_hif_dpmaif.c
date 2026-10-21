@@ -104,7 +104,7 @@ static inline struct device *ccci_md_get_dev_by_id(int md_id)
 	return &dpmaif_ctrl->plat_dev->dev;
 }
 #endif
-#if defined(_DPMAIF_MED_SUPPORT_) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(_DPMAIF_MED_SUPPORT_) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 #include "medmcu_ipi_pin.h"
 #include "medmcu_common.h"
 #include <linux/mutex.h>
@@ -119,7 +119,7 @@ int dummyDrbBase5 = 55; //dummy drb base for MED's tx queue 5
 static int disable_rx_pitnat_log = 1;
 module_param(disable_rx_pitnat_log, uint, 0644);
 MODULE_PARM_DESC (disable_rx_pitnat_log, "disable rx_pitnat_log debugging");
-#if defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 uint32_t msg_med_ccci[2]; //dummy msg for ipi usage
 static DEFINE_MUTEX(scp_A_notify_mutex);
 atomic_t med_mcu_ack_flag;
@@ -2228,7 +2228,7 @@ extern struct eth_pdu_info_t get_eth_pdu_info(void);
 extern int (*ppe_hook_rx_modem)(struct sk_buff *skb, u8 drop, u8 channel);
 #elif defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD)
 extern void ccmni_set_ppe_rx_info(struct sk_buff *skb, u8 drop, u8 channel);
-#elif defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#elif IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 extern void ccmni_recycle_med_hnat_info(void);
 #endif
 #endif
@@ -2273,7 +2273,7 @@ static int dpmaif_send_med_skb_to_net(struct dpmaif_rx_queue *rxq,
 		}
 #elif defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD)
 		ccmni_set_ppe_rx_info(new_skb, 1, 255);
-#elif defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#elif IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 		ccmni_recycle_med_hnat_info();
 #endif
 #endif
@@ -2299,7 +2299,7 @@ static int dpmaif_send_med_skb_to_net(struct dpmaif_rx_queue *rxq,
 	}
 #elif defined(CONFIG_NETFILTER_XT_TARGET_FLOWOFFLOAD)
 	ccmni_set_ppe_rx_info(new_skb, 0, rxq->cur_chn_idx);
-#elif defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#elif IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 	ccmni_recycle_med_hnat_info();
 #endif
 #endif
@@ -2896,7 +2896,7 @@ static int dpmaif_rx_med_data_collect(struct hif_dpmaif_ctrl *hif_ctrl,
 }
 
 /*Communication functions with MEDMCU part*/
-#if defined(_DPMAIF_MED_SUPPORT_) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(_DPMAIF_MED_SUPPORT_) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 void dpmaif_ipi_rx_request(int id, void *data, unsigned int len)
 {
 	/*to-do*//*check this ipi is for ccci or not*/
@@ -4708,7 +4708,7 @@ int dpmaif_start(unsigned char hif_id)
 	struct dpmaif_rx_queue *rxq = NULL;
 	struct dpmaif_tx_queue *txq = NULL;
 	int i, ret = 0;
-#if defined(_DPMAIF_MED_SUPPORT_) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(_DPMAIF_MED_SUPPORT_) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 #ifndef DPMAIF_MEDHW_RXIRQ
 	int ipi_ret = 0;
 #endif
@@ -4889,7 +4889,7 @@ int dpmaif_start(unsigned char hif_id)
 #endif
 	dpmaif_enable_irq(dpmaif_ctrl);
 	dpmaif_ctrl->dpmaif_state = HIFDPMAIF_STATE_PWRON;
-#if defined(_DPMAIF_MED_SUPPORT_) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+#if defined(_DPMAIF_MED_SUPPORT_) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 	rxq->skb_low_mem_idx = -1;
 	rxq->page_low_mem_idx = -1;
 #ifndef DPMAIF_MEDHW_RXIRQ
@@ -5701,9 +5701,24 @@ static struct ccci_hif_ops ccci_hif_dpmaif_ops = {
 	.debug = &dpmaif_debug,
 };
 
-static struct syscore_ops dpmaif_sysops = {
-	.suspend = dpmaif_syssuspend,
-	.resume = dpmaif_sysresume,
+/* Linux 6.18: syscore callbacks take a data pointer and are registered via struct syscore. */
+static int dpmaif_sysops_suspend(void *data)
+{
+	return dpmaif_syssuspend();
+}
+
+static void dpmaif_sysops_resume(void *data)
+{
+	dpmaif_sysresume();
+}
+
+static const struct syscore_ops dpmaif_sysops = {
+	.suspend = dpmaif_sysops_suspend,
+	.resume = dpmaif_sysops_resume,
+};
+
+static struct syscore dpmaif_sysops_syscore = {
+	.ops = &dpmaif_sysops,
 };
 
 /* =======================================================
@@ -5950,9 +5965,9 @@ int ccci_dpmaif_hif_init(struct device *dev)
 #endif
 	ccci_hif_register(DPMAIF_HIF_ID, (void *)dpmaif_ctrl,
 		&ccci_hif_dpmaif_ops);
-	register_syscore_ops(&dpmaif_sysops);
+	register_syscore(&dpmaif_sysops_syscore);
 	//mtk_ccci_speed_monitor_init(dev);
-	#if defined(_DPMAIF_MED_SUPPORT_) && defined(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
+	#if defined(_DPMAIF_MED_SUPPORT_) && IS_ENABLED(CONFIG_MTK_TINYSYS_MEDMCU_SUPPORT)
 	/*register MEDMCU notify*/
 	CCCI_NORMAL_LOG(-1, TAG, "dpmaif: scp_A_register_notify\n");
 	scp_A_register_notify(&apsync_notifier);

@@ -59,7 +59,7 @@
 
 /*#define CCCI_LOG_LEVEL     1*/
 
-#if !defined(CONFIG_MTK_ECCCI_FLASHLESS)
+#if !IS_ENABLED(CONFIG_MTK_ECCCI_FLASHLESS)
 /*#define DPMAIF_DEBUG_LOG*/
 #define DEBUG_FOR_CCB
 #endif
