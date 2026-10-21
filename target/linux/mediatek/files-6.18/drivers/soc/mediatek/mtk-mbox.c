@@ -54,7 +54,7 @@ int mtk_mbox_write_hd(struct mtk_mbox_device *mbdev, unsigned int mbox,
 	struct mtk_mbox_info *minfo;
 	struct mtk_ipi_msg *ipimsg;
 	void __iomem *base;
-	int len;
+	u32 len;
 	unsigned long flags;
 
 	if (!mbdev) {
@@ -74,7 +74,9 @@ int mtk_mbox_write_hd(struct mtk_mbox_device *mbdev, unsigned int mbox,
 	ipimsg = (struct mtk_ipi_msg *)msg;
 	len = ipimsg->ipihd.len;
 
-	if (len > size * MBOX_SLOT_SIZE)
+	/* header and payload must fit between the slot and the end of the mbox */
+	if (slot >= size ||
+	    sizeof(struct mtk_ipi_msg_hd) + len > (size - slot) * MBOX_SLOT_SIZE)
 		return MBOX_WRITE_SZ_ERR;
 
 	spin_lock_irqsave(&mbdev->info_table[mbox].mbox_lock, flags);
@@ -112,6 +114,7 @@ int mtk_mbox_read_hd(struct mtk_mbox_device *mbdev, unsigned int mbox,
 	struct mtk_ipi_msg_hd *ipihd;
 	void __iomem *base;
 	unsigned long flags;
+	u32 len;
 
 	if (!mbdev) {
 		pr_notice("[MBOX]read header fail, dev null");
@@ -127,9 +130,19 @@ int mtk_mbox_read_hd(struct mtk_mbox_device *mbdev, unsigned int mbox,
 	base = minfo->base;
 	slot_ofs = slot * MBOX_SLOT_SIZE;
 	size = minfo->slot;
+
+	if (slot >= size ||
+	    sizeof(struct mtk_ipi_msg_hd) > (size - slot) * MBOX_SLOT_SIZE)
+		return MBOX_READ_SZ_ERR;
+
 	ipihd = (struct mtk_ipi_msg_hd *)(base + slot_ofs);
 
-	if (ipihd->len > size * MBOX_SLOT_SIZE)
+	/*
+	 * The remote processor writes the length: read it once, and only copy
+	 * what fits between the slot and the end of the mbox.
+	 */
+	len = READ_ONCE(ipihd->len);
+	if (sizeof(struct mtk_ipi_msg_hd) + len > (size - slot) * MBOX_SLOT_SIZE)
 		return MBOX_READ_SZ_ERR;
 
 	spin_lock_irqsave(&mbdev->info_table[mbox].mbox_lock, flags);
@@ -137,11 +150,11 @@ int mtk_mbox_read_hd(struct mtk_mbox_device *mbdev, unsigned int mbox,
 	if (mbdev->memcpy_from_tiny)
 		mbdev->memcpy_from_tiny(dest, (void __iomem *)
 			(base + slot_ofs + sizeof(struct mtk_ipi_msg_hd)),
-			ipihd->len);
+			len);
 	else
 		mtk_memcpy_from_tinysys(dest, (void __iomem *)
 			(base + slot_ofs + sizeof(struct mtk_ipi_msg_hd)),
-			ipihd->len);
+			len);
 	spin_unlock_irqrestore(&mbdev->info_table[mbox].mbox_lock, flags);
 
 	return MBOX_DONE;
@@ -172,7 +185,7 @@ int mtk_mbox_write(struct mtk_mbox_device *mbdev, unsigned int mbox,
 	slot_ofs = slot * MBOX_SLOT_SIZE;
 	size = minfo->slot;
 
-	if (slot > size)
+	if (slot >= size || len > (size - slot) * MBOX_SLOT_SIZE)
 		return MBOX_WRITE_SZ_ERR;
 
 	spin_lock_irqsave(&mbdev->info_table[mbox].mbox_lock, flags);
@@ -214,7 +227,7 @@ int mtk_mbox_read(struct mtk_mbox_device *mbdev, unsigned int mbox,
 	slot_ofs = slot * MBOX_SLOT_SIZE;
 	size = minfo->slot;
 
-	if (slot > size)
+	if (slot >= size || len > (size - slot) * MBOX_SLOT_SIZE)
 		return MBOX_READ_SZ_ERR;
 
 	spin_lock_irqsave(&mbdev->info_table[mbox].mbox_lock, flags);
