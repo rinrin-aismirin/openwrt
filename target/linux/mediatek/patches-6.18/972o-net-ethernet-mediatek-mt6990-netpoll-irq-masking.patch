@@ -1,0 +1,64 @@
+From: OpenWrt MT6990 repair <mt6990@local>
+Subject: [PATCH] net: ethernet: mediatek: keep MT6990 IRQ masking balanced under netpoll
+
+mtk_poll_controller() masks the TX and RX sources, runs the RX handler and
+then unmasks both sources unconditionally, even while TX or RX NAPI is
+scheduled. On MT6990 both FE interrupts are level triggered, and the TX
+handler (972k) disables the Linux IRQ line on every invocation while
+mtk_napi_tx() enables it once per round. With netconsole under TX load the
+extra TX invocation leaves the line disabled for good (TX completions stop),
+and the RX source left unmasked while RX NAPI is pending storms the RX IRQ
+until the MT6990 hang detector panics.
+
+On MT6990:
+- disable the TX line only when the handler schedules TX NAPI, so that each
+  disable_irq_nosync() pairs with the enable_irq() in mtk_napi_tx(); if NAPI
+  is already scheduled, only mask the source;
+- let mtk_poll_controller() only schedule TX and RX NAPI through the IRQ
+  handlers and leave unmasking to the NAPI handlers.
+
+Other SoCs keep the existing behaviour.
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -3903,12 +3903,19 @@ static irqreturn_t mtk_handle_irq_tx(int
+ 	struct mtk_eth *eth = _eth;
+ 
+ 	eth->tx_events++;
+-	if (MTK_HAS_CAPS(eth->soc->caps, MTK_SOC_MT6990))
+-		disable_irq_nosync(irq);
+-
+ 	if (likely(napi_schedule_prep(&eth->tx_napi))) {
++		/* MT6990: mask the level TX line once per NAPI round;
++		 * mtk_napi_tx() unmasks it when the round completes.
++		 */
++		if (MTK_HAS_CAPS(eth->soc->caps, MTK_SOC_MT6990))
++			disable_irq_nosync(irq);
+ 		mtk_tx_irq_disable(eth, mtk_tx_done_mask(eth));
+ 		__napi_schedule(&eth->tx_napi);
++	} else if (MTK_HAS_CAPS(eth->soc->caps, MTK_SOC_MT6990)) {
++		/* NAPI is already scheduled and owns the line: only mask
++		 * the source so that the level IRQ does not fire again.
++		 */
++		mtk_tx_irq_disable(eth, mtk_tx_done_mask(eth));
+ 	}
+ 
+ 	return IRQ_HANDLED;
+@@ -3940,6 +3947,17 @@ static void mtk_poll_controller(struct n
+ 	struct mtk_mac *mac = netdev_priv(dev);
+ 	struct mtk_eth *eth = mac->hw;
+ 
++	if (MTK_HAS_CAPS(eth->soc->caps, MTK_SOC_MT6990)) {
++		/* Only schedule NAPI, as the IRQ handlers do. Unmasking is
++		 * left to the NAPI handlers: re-enabling the level TX/RX
++		 * sources while NAPI is pending makes the RX IRQ storm and
++		 * unbalances the TX line masking.
++		 */
++		mtk_handle_irq_tx(eth->irq[mtk_tx_irq_index(eth)], eth);
++		mtk_handle_irq_rx(eth->irq[mtk_rx_irq_index(eth)], eth);
++		return;
++	}
++
+ 	mtk_tx_irq_disable(eth, mtk_tx_done_mask(eth));
+ 	mtk_rx_irq_disable(eth, eth->soc->rx.irq_done_mask);
+ 	mtk_handle_irq_rx(eth->irq[mtk_rx_irq_index(eth)], eth);
