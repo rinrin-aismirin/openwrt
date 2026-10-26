@@ -1,0 +1,9 @@
+#!/bin/sh /etc/rc.common
+# End of boot: mark the booted slot successful (see /usr/sbin/air6-slot boot-done).
+START=99
+
+boot() {
+	. /lib/functions.sh
+	[ "$(board_name)" = "softbank,air6" ] || return 0
+	/usr/sbin/air6-slot boot-done
+}

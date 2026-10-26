@@ -1,0 +1,9 @@
+#!/bin/sh /etc/rc.common
+# Trial images only (air6.trial=1): arm the return timer early in boot (see /usr/sbin/air6-slot trial arm).
+START=11
+
+boot() {
+	. /lib/functions.sh
+	[ "$(board_name)" = "softbank,air6" ] || return 0
+	/usr/sbin/air6-slot trial arm
+}

@@ -1,0 +1,287 @@
+#!/bin/sh
+# A/B slot control for the SoftBank Air 6.
+#
+#   air6-slot status            booted and next slot, boot control bytes, image policy, trial timer, failed updates
+#   air6-slot current           print the booted slot (a or b)
+#   air6-slot boot-done         (init, end of boot) mark the booted slot successful; reset the other slot's retry
+#                               when it is above 3, recording it first when that slot never succeeded. Not a health
+#                               check. Safe to run again after a failed write.
+#   air6-slot set-active SLOT   boot SLOT (a or b) next time; SLOT must be successful. Does not reboot.
+#   air6-slot trial arm         (init, early boot) trial image whose booted slot is not successful yet: return to
+#                               the other slot and reboot after 600 s unless 'trial commit' runs first
+#   air6-slot trial commit      accept the trial slot: mark it successful and cancel the timer
+#
+# A trial image has air6.trial=1 on the kernel command line (set at build time). Exit codes: 0 done, 2 usage,
+# 3 refused (nothing changed), 4 busy, 5 environment or read error (nothing changed), 6 failed after a write was
+# started (read the state again with 'status').
+
+. "${AIR6_SLOT_LIB:-/lib/air6/bootctrl.sh}"
+
+TAG=air6-slot
+: "${AIR6_SLOT_RUN:=/tmp/air6-slot}"
+: "${AIR6_SLOT_ETC:=/etc/air6-slot}"
+EVENTS="$AIR6_SLOT_ETC/failed-events"
+EVENTS_KEEP=10
+TIMER="$AIR6_SLOT_RUN/timer"
+TRIAL_SECONDS=600
+# At expiry the lock is tried without waiting every EXPIRE_PAUSE seconds until EXPIRE_WINDOW seconds after the
+# deadline (uptime); the deadline is not extended and no attempt starts after the window.
+EXPIRE_WINDOW=60
+EXPIRE_PAUSE=5
+
+log() { logger -t "$TAG" "$*" 2>/dev/null; echo "$*"; }
+err() { logger -t "$TAG" "error: $*" 2>/dev/null; echo "error: $*" >&2; }
+usage() { sed -n '4,12p' "$0" >&2; exit 2; }
+
+is_trial() { tr -s ' \t\n' '\n' < "$BC_CMDLINE" 2>/dev/null | grep -qFx air6.trial=1; }
+: "${AIR6_UPTIME:=/proc/uptime}"
+uptime_s() { cut -d. -f1 "$AIR6_UPTIME"; }
+
+# Trial timer state, one line in $TIMER: "<state> <token> <deadline (uptime s)>". Read and written under the lock.
+# timer_put replaces the file through a temporary file and fails when the new state was not stored.
+timer_get() { [ -f "$TIMER" ] && cat "$TIMER"; }
+timer_put() {
+	mkdir -p "$AIR6_SLOT_RUN" 2>/dev/null && echo "$*" > "$TIMER.tmp" 2>/dev/null && mv "$TIMER.tmp" "$TIMER" 2>/dev/null &&
+		[ "$(cat "$TIMER" 2>/dev/null)" = "$*" ] && return 0
+	rm -f "$TIMER.tmp" 2>/dev/null
+	err "trial timer state '$*' not saved in $TIMER"
+	return 1
+}
+
+# record_event REC: keep a failed-update observation (the other slot never succeeded and reached the retry limit).
+# A failure here never stops the boot control writes.
+record_event() {
+	local o="$BC_OTHER" line tmp obs
+	# The observation without the time; a rerun of boot-done in the same boot does not add it again.
+	obs="boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+	obs="$obs booted=$BC_CUR slot=$o prio=$(bc_get "$1" "$o" prio) retry=$(bc_get "$1" "$o" retry) success=00"
+	if [ -f "$EVENTS" ] && grep -qF " $obs" "$EVENTS"; then
+		echo "record: slot $o reached the retry limit without succeeding (already recorded in this boot)"
+		return 0
+	fi
+	line="$(echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)(clock-unverified) $obs" | cut -c1-160)"
+	logger -t "$TAG" "slot $o never succeeded and reached the retry limit: $line" 2>/dev/null
+	tmp="$EVENTS.tmp"
+	if mkdir -p "$AIR6_SLOT_ETC" && { [ -f "$EVENTS" ] && cat "$EVENTS"; echo "$line"; } | tail -n "$EVENTS_KEEP" > "$tmp" &&
+		mv "$tmp" "$EVENTS"; then
+		echo "record: slot $o reached the retry limit without succeeding (saved)"
+	else
+		rm -f "$tmp" 2>/dev/null
+		err "record: slot $o reached the retry limit without succeeding (NOT saved to $EVENTS)"
+	fi
+}
+
+do_boot_done() {
+	local r n rc o="$BC_OTHER" c="$BC_CUR" oretry
+	r="$(bc_read)" || return 5
+	bc_valid "$r" || { err "unexpected boot control record $r; nothing changed"; return 5; }
+	n="$r"
+	oretry=$((0x$(bc_get "$r" "$o" retry)))
+	if [ "$(bc_get "$r" "$o" success)" = 00 ] && [ "$oretry" -ge 4 ]; then
+		record_event "$r"
+	fi
+	[ "$oretry" -gt 3 ] && n="$(bc_reset_retry "$n" "$o")"
+	if is_trial && [ "$(bc_get "$r" "$c" success)" = 00 ]; then
+		echo "slot $c: trial, not successful yet; left unchanged until 'air6-slot trial commit'"
+	else
+		n="$(bc_mark_success "$n" "$c")"
+	fi
+	bc_write "$r" "$n"; rc=$?
+	if [ "$rc" = 0 ]; then
+		[ "$oretry" -gt 3 ] && log "slot $o retry $(bc_get "$r" "$o" retry) -> 00"
+		if [ "$r" = "$n" ]; then echo "no change (bootctrl $r)"
+		elif [ "$(bc_get "$n" "$c" success)" = 01 ]; then log "slot $c successful (bootctrl $r -> $n)"
+		fi
+	else
+		err "boot-done: write of $n failed (was $r, now $(bc_read 2>/dev/null)); run 'air6-slot boot-done' again"
+	fi
+	return "$rc"
+}
+
+do_set_active() {
+	local r n rc
+	r="$(bc_read)" || return 5
+	bc_valid "$r" || { err "unexpected boot control record $r; nothing changed"; return 5; }
+	n="$(bc_select_successful "$r" "$1")" ||
+		{ err "slot $1 is not marked successful; not selecting it"; return 3; }
+	bc_write "$r" "$n"; rc=$?
+	if [ "$rc" = 0 ]; then
+		log "slot $1 boots next (bootctrl $r -> $n)"
+		# A manual choice ends a pending trial timer.
+		set -- $(timer_get)
+		[ "$1" = armed ] && { timer_put "cancelled $2 $3" ||
+			err "set-active: the pending trial timer could not be marked cancelled; it will not act (slot $BC_CUR is no longer next)"; }
+	else
+		err "set-active: write of $n failed (was $r, now $(bc_read 2>/dev/null))"
+	fi
+	return "$rc"
+}
+
+do_status() {
+	local r s left
+	r="$(bc_read)" || return 5
+	echo "booted=$BC_CUR"
+	echo "next=$(bc_next "$r")"
+	for s in a b; do
+		echo "slot $s: prio=$(bc_get "$r" $s prio) retry=$(bc_get "$r" $s retry) success=$(bc_get "$r" $s success) uptype=$(bc_get "$r" $s uptype)"
+	done
+	bc_valid "$r" || echo "warning: unexpected boot control record $r"
+	if is_trial; then
+		echo "policy=trial"
+		set -- $(timer_get)
+		case "$1" in
+		armed)
+			left=$(($3 - $(uptime_s)))
+			if [ "$left" -ge 0 ]; then
+				echo "timer=armed, returns to slot $BC_OTHER in ${left}s unless 'air6-slot trial commit'"
+			elif [ "$left" -ge "$((-EXPIRE_WINDOW))" ]; then
+				echo "timer=armed, due $((-left))s ago (still retrying the boot control lock)"
+			else
+				echo "timer=overdue: the return to slot $BC_OTHER did not happen and is no longer retried ($((-left))s past the deadline; see 'logread -e air6-slot')"
+			fi ;;
+		"") echo "timer=none" ;;
+		*) echo "timer=$1" ;;
+		esac
+	else
+		echo "policy=normal"
+	fi
+	if [ -s "$EVENTS" ]; then
+		echo "failed updates (a slot reached the retry limit without succeeding; clock may be wrong):"
+		sed 's/^/  /' "$EVENTS"
+	else
+		echo "failed updates: none recorded"
+	fi
+}
+
+# do_trial_arm: decide under the lock; the timer itself runs outside it.
+do_trial_arm() {
+	local r token deadline
+	[ -z "$(timer_get)" ] || { echo "trial timer already handled in this boot: $(timer_get)"; return 0; }
+	r="$(bc_read)" || return 5
+	bc_valid "$r" || { timer_put "error - -"; err "unexpected boot control record $r; trial timer not armed"; return 5; }
+	if [ "$(bc_get "$r" "$BC_CUR" success)" = 01 ]; then
+		timer_put "committed - -"; echo "slot $BC_CUR is already successful; no trial timer"; return 0
+	fi
+	if [ "$(bc_get "$r" "$BC_OTHER" success)" != 01 ]; then
+		timer_put "no-fallback - -"; err "trial, but slot $BC_OTHER is not successful: no timer protection"; return 3
+	fi
+	if [ "$(bc_next "$r")" != "$BC_CUR" ]; then
+		timer_put "not-armed - -"; err "trial, but slot $BC_CUR is not the next boot slot; no timer"; return 3
+	fi
+	token="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)-$(uptime_s)"
+	deadline=$(($(uptime_s) + TRIAL_SECONDS))
+	timer_put "armed $token $deadline" ||
+		{ err "trial: no timer protection (state not saved)"; return 5; }
+	echo "TOKEN=$token $deadline"
+}
+
+# do_trial_expire TOKEN: switch back only if nothing changed since the timer was armed. Prints "fired" when the
+# caller has to reboot.
+do_trial_expire() {
+	local r n
+	set -- "$1" $(timer_get)
+	[ "$2" = armed ] && [ "$3" = "$1" ] || return 0
+	r="$(bc_read)" || { timer_put "error $1 -"; err "trial: boot control not readable at expiry; slot not switched"; return 5; }
+	if [ "$(bc_get "$r" "$BC_CUR" success)" = 01 ] || [ "$(bc_next "$r")" != "$BC_CUR" ]; then
+		timer_put "cancelled $1 -"; return 0
+	fi
+	n="$(bc_select_successful "$r" "$BC_OTHER")" ||
+		{ timer_put "no-fallback $1 -"; err "trial: slot $BC_OTHER is not successful at expiry; not switching"; return 3; }
+	if bc_write "$r" "$n"; then
+		# The switch is done; 'trial commit' also refuses because slot $BC_CUR is no longer next.
+		timer_put "fired $1 -"
+		echo fired
+	else
+		timer_put "error $1 -"
+		err "trial: switch to slot $BC_OTHER failed at expiry (was $r, wanted $n, now $(bc_read 2>/dev/null)); not rebooting"
+		return 6
+	fi
+}
+
+# trial_expire TOKEN DEADLINE: run do_trial_expire under the lock. A busy lock is tried again (one non-waiting
+# attempt each time) until EXPIRE_WINDOW seconds after DEADLINE; the deadline itself is not extended.
+trial_expire() {
+	local out rc limit=$(($2 + EXPIRE_WINDOW))
+	BC_LOCK_TRIES=1
+	while :; do
+		if [ "$(uptime_s)" -gt "$limit" ]; then
+			err "trial: boot control lock busy until ${EXPIRE_WINDOW}s after the deadline; slot $BC_OTHER not selected, not rebooting"
+			return 4
+		fi
+		out="$(bc_with_lock do_trial_expire "$1")"; rc=$?
+		[ "$rc" = 4 ] || break
+		sleep "$EXPIRE_PAUSE"
+	done
+	[ "$out" = fired ] || return "$rc"
+	log "trial: not committed within ${TRIAL_SECONDS}s; slot $BC_OTHER selected, rebooting"
+	sync
+	reboot
+}
+
+trial_arm() {
+	local token deadline
+	is_trial || { echo "not a trial image; nothing to arm"; return 0; }
+	token="$(bc_with_lock do_trial_arm)" || return $?
+	case "$token" in TOKEN=*) token="${token#TOKEN=}" ;; *) echo "$token"; return 0 ;; esac
+	set -- $token
+	token=$1 deadline=$2
+	log "trial: slot $BC_CUR not committed; returning to slot $BC_OTHER in ${TRIAL_SECONDS}s unless 'air6-slot trial commit' runs"
+	(
+		sleep "$TRIAL_SECONDS"
+		trial_expire "$token" "$deadline"
+	) </dev/null >/dev/null 2>&1 &
+}
+
+do_trial_commit() {
+	local r n rc
+	set -- $(timer_get)
+	[ "$1" = fired ] && { err "the trial timer already selected slot $BC_OTHER; a reboot is pending"; return 3; }
+	r="$(bc_read)" || return 5
+	bc_valid "$r" || { err "unexpected boot control record $r; nothing changed"; return 5; }
+	# The timer state can be lost; the boot control record still shows a switch that already happened.
+	[ "$(bc_next "$r")" = "$BC_CUR" ] ||
+		{ err "slot $BC_CUR is no longer the next boot slot (bootctrl $r); not committing"; return 3; }
+	n="$(bc_mark_success "$r" "$BC_CUR")"
+	bc_write "$r" "$n"; rc=$?
+	if [ "$rc" = 0 ]; then
+		[ "$1" = armed ] && { timer_put "committed $2 -" ||
+			err "trial commit: slot committed, but the timer state was not updated; the timer will not act (slot is successful)"; }
+		log "slot $BC_CUR committed (bootctrl $r -> $n)"
+	else
+		err "trial commit: write of $n failed (was $r, now $(bc_read 2>/dev/null))"
+	fi
+	return "$rc"
+}
+
+cmd="$1"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+current)
+	[ $# = 0 ] || usage
+	bc_current || { err "bootslot not on the kernel command line"; exit 5; }
+	exit 0 ;;
+status|boot-done)
+	[ $# = 0 ] || usage ;;
+set-active)
+	[ $# = 1 ] || usage
+	case "$1" in a|b) ;; *) usage ;; esac ;;
+trial)
+	[ $# = 1 ] || usage
+	case "$1" in arm|commit) ;; *) usage ;; esac ;;
+*)
+	usage ;;
+esac
+
+bc_init || exit 5
+case "$cmd" in
+status) bc_with_lock do_status ;;
+boot-done) bc_with_lock do_boot_done ;;
+set-active) bc_with_lock do_set_active "$1" ;;
+trial)
+	case "$1" in
+	arm) trial_arm ;;
+	commit)
+		is_trial || { err "not a trial image"; exit 3; }
+		bc_with_lock do_trial_commit ;;
+	esac ;;
+esac

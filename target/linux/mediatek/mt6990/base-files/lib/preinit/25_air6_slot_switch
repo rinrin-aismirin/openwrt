@@ -1,0 +1,168 @@
+# Hold the front LEVEL key from power-on to boot the other slot next (air6-slot set-active).
+#
+# Runs before the failsafe wait. The key is read from its GPIO level (debugfs): the gpio-button-hotplug module is
+# loaded before procd's preinit hotplug listener starts, so the event for a key held at power-on can be lost.
+#
+#   key not held: nothing happens (no delay)
+#   held: the blue signal LEDs count down 3-2-1; releasing during the countdown cancels
+#   then: the other slot is selected (it must be successful); the blue LEDs blink until the key is released,
+#         then the unit reboots. If the selection is refused before writing, the red LED blinks until release
+#         and the boot continues normally. If the write itself fails, the red LED stays on (next slot uncertain).
+#   not released within 60 s: the selection is undone if possible and the boot continues (red LED on); the
+#         console says when the undo was refused or failed.
+# LEVEL is not a failsafe key on the Air 6: the BTN_0 trigger left by this key is removed here, and
+# 29_air6_failsafe_keys discards a BTN_0 trigger that arrives later during the failsafe wait. RESET and WPS still
+# enter failsafe.
+
+: "${AIR6_LEVEL_GPIO:=/sys/kernel/debug/gpio}"
+: "${AIR6_LEDS:=/sys/class/leds}"
+: "${AIR6_SLOT_CMD:=/usr/sbin/air6-slot}"
+: "${AIR6_FAILSAFE_BUTTON:=/tmp/failsafe_button}"
+AIR6_RELEASE_WAIT=60
+
+air6_level_held() {
+	local line
+	line="$(grep -m1 '|LEVEL_KEY ' "$AIR6_LEVEL_GPIO" 2>/dev/null)" || return 1
+	case "$line" in
+	*" in  lo "*"ACTIVE LOW"*) return 0 ;;
+	*" in  hi "*"ACTIVE LOW"*) return 1 ;;
+	*" in  hi "*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+air6_led() {
+	local d="$AIR6_LEDS/$1" v=0
+	[ -d "$d" ] || return 0
+	[ "$2" = 1 ] && v="$(cat "$d/max_brightness" 2>/dev/null || echo 1)"
+	echo none > "$d/trigger" 2>/dev/null
+	echo "$v" > "$d/brightness" 2>/dev/null
+}
+
+air6_leds() {
+	local v="$1" l
+	shift
+	for l in "$@"; do air6_led "$l" "$v"; done
+}
+
+# air6_wait_up: wait until the key is released without touching the LEDs; fails after AIR6_RELEASE_WAIT seconds.
+air6_wait_up() {
+	local i=0
+	while air6_level_held; do
+		[ "$i" -lt "$AIR6_RELEASE_WAIT" ] || return 1
+		i=$((i + 1))
+		sleep 1
+	done
+}
+
+# air6_wait_release LED...: blink the LEDs until the key is released; fails after AIR6_RELEASE_WAIT seconds.
+air6_wait_release() {
+	local i=0 v=1
+	while air6_level_held; do
+		[ "$i" -lt "$AIR6_RELEASE_WAIT" ] || return 1
+		air6_leds "$v" "$@"
+		v=$((1 - v)); i=$((i + 1))
+		sleep 1
+	done
+	air6_leds 0 "$@"
+}
+
+# air6_drop_level_trigger: drop a BTN_0 (LEVEL) failsafe trigger without losing a RESET or WPS one. The trigger file
+# is written by /etc/rc.button/failsafe (one handler at a time, "echo > file", no lock), so it is first taken away
+# with a rename and only then read: a writer that comes later creates a new file, and a writer that had the file
+# open before the rename has already emptied it. BTN_0 in the taken file is dropped; anything else (a key name, or
+# an empty file still being written) is put back. While the file is taken away, failsafe_wait can look and miss it;
+# a put-back trigger is therefore also latched in <file>.air6-kept, which 31_air6_failsafe_keys turns into FAILSAFE.
+# Returns 1 when a non-LEVEL trigger was put back, else 0.
+air6_drop_level_trigger() {
+	local claim="$AIR6_FAILSAFE_BUTTON.air6-claim" c=
+	mv "$AIR6_FAILSAFE_BUTTON" "$claim" 2>/dev/null || return 0
+	{ read -r c < "$claim"; } 2>/dev/null
+	if [ "$c" = BTN_0 ]; then
+		rm -f "$claim"
+		return 0
+	fi
+	echo "${c:-unknown}" > "$AIR6_FAILSAFE_BUTTON.air6-kept"
+	echo "${c:-unknown}" > "$AIR6_FAILSAFE_BUTTON"
+	rm -f "$claim"
+	return 1
+}
+
+# Only the BTN_0 trigger: RESET and WPS presses still enter failsafe. The release event of the key reaches
+# /etc/rc.button/failsafe shortly after the GPIO reads released, hence the pause.
+air6_level_cleanup() {
+	sleep 1
+	air6_drop_level_trigger
+	[ -n "$AIR6_DEBUGFS_MOUNTED" ] && umount /sys/kernel/debug 2>/dev/null
+}
+
+air6_slot_switch() {
+	local cur other n rc
+	[ "$(board_name)" = "softbank,air6" ] || return 0
+	AIR6_DEBUGFS_MOUNTED=
+	if [ "$AIR6_LEVEL_GPIO" = /sys/kernel/debug/gpio ] && ! grep -qs ' /sys/kernel/debug ' /proc/mounts; then
+		mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null && AIR6_DEBUGFS_MOUNTED=1
+	fi
+	if ! air6_level_held; then
+		[ -n "$AIR6_DEBUGFS_MOUNTED" ] && umount /sys/kernel/debug 2>/dev/null
+		return 0
+	fi
+
+	echo "- air6: LEVEL key held, release it within 3 s to cancel the slot switch -"
+	if ! cur="$("$AIR6_SLOT_CMD" current)"; then
+		echo "- air6: booted slot unknown, not switching -"
+		air6_wait_release red:signal-1
+		air6_level_cleanup
+		return 0
+	fi
+	[ "$cur" = a ] && other=b || other=a
+
+	air6_leds 1 blue:signal-1 blue:signal-2 blue:signal-3
+	for n in 3 2 1; do
+		sleep 1
+		if ! air6_level_held; then
+			air6_leds 0 blue:signal-1 blue:signal-2 blue:signal-3
+			echo "- air6: slot switch cancelled -"
+			air6_level_cleanup
+			return 0
+		fi
+		air6_led "blue:signal-$n" 0
+	done
+
+	"$AIR6_SLOT_CMD" set-active "$other"; rc=$?
+	if [ "$rc" = 6 ]; then
+		# The write started and failed: the next boot slot is not known. Red stays on.
+		air6_led red:signal-1 1
+		echo "- air6: selecting slot $other failed during the write; the next boot slot is uncertain, check 'air6-slot status' -"
+		air6_wait_up
+		air6_level_cleanup
+		return 0
+	elif [ "$rc" != 0 ]; then
+		echo "- air6: slot $other not selected (air6-slot exit $rc, nothing changed), booting slot $cur -"
+		air6_wait_release red:signal-1 || air6_led red:signal-1 1
+		air6_level_cleanup
+		return 0
+	fi
+
+	echo "- air6: slot $other boots next; release the LEVEL key to reboot -"
+	if air6_wait_release blue:signal-1 blue:signal-2 blue:signal-3; then
+		air6_level_cleanup
+		sync
+		reboot -f
+		echo "- air6: reboot failed; slot $other boots next time -"
+		air6_led red:signal-1 1
+		return 0
+	fi
+
+	air6_leds 0 blue:signal-1 blue:signal-2 blue:signal-3
+	air6_led red:signal-1 1
+	"$AIR6_SLOT_CMD" set-active "$cur"; rc=$?
+	case "$rc" in
+	0) echo "- air6: LEVEL key not released within ${AIR6_RELEASE_WAIT} s: switch undone, booting slot $cur -" ;;
+	6) echo "- air6: LEVEL key not released; undoing the switch failed during the write, the next boot slot is uncertain; check 'air6-slot status' -" ;;
+	*) echo "- air6: LEVEL key not released; the switch could not be undone (air6-slot exit $rc), slot $other boots next -" ;;
+	esac
+	air6_level_cleanup
+}
+
+boot_hook_add preinit_main air6_slot_switch

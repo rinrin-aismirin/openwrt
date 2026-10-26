@@ -1,9 +1,0 @@
-#!/bin/sh /etc/rc.common
-# Arm the Air 6 A/B guard early in boot (see /usr/sbin/air6-abguard).
-START=11
-
-boot() {
-	. /lib/functions.sh
-	[ "$(board_name)" = "softbank,air6" ] || return 0
-	/usr/sbin/air6-abguard arm 600
-}
