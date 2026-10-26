@@ -1,0 +1,115 @@
+# Enter failsafe with the RESET or WPS key on the Air 6.
+#
+# Key events reach /etc/rc.button/failsafe only through procd's preinit hotplug listener. On this board it handles
+# them only after the kernel RNG is initialized (10-19 s after power-on), which is after the failsafe wait has ended.
+# This hook reads the key GPIO levels (debugfs) during the whole failsafe wait instead and writes the name of a
+# pressed key to /tmp/failsafe_button, which failsafe_wait checks when the wait ends. The LEVEL key is not a
+# failsafe key (it is 25_air6_slot_switch's): while no key is found, every pass also drops a BTN_0 trigger written
+# by a delayed hotplug event (air6_drop_level_trigger from 25_air6_slot_switch, which keeps a RESET or WPS trigger
+# written at the same time and then ends the poll). A BTN_0 event delivered after the last pass and before
+# failsafe_wait reads the file still enters failsafe; that gap is a few shell statements long.
+#
+# A trigger put back by air6_drop_level_trigger is latched, and 31_air6_failsafe_keys turns the latch into FAILSAFE
+# (the file may have been away when failsafe_wait looked). Side effect: a RESET/WPS (or empty, being written)
+# trigger that the hotplug handler writes after failsafe_wait has looked but before the poll's last pass also enters
+# failsafe; on this board such a late event describes an earlier press. A key read from GPIO in that window is not
+# counted.
+#
+# This busybox has no sub-second sleep, so the poll loop runs without pauses; it uses shell builtins except when a
+# trigger file is present (mv/rm in air6_drop_level_trigger) and is stopped by 31_air6_failsafe_keys, which runs
+# right after failsafe_wait.
+
+: "${AIR6_KEYS_GPIO:=/sys/kernel/debug/gpio}"
+: "${AIR6_FAILSAFE_BUTTON:=/tmp/failsafe_button}"
+: "${AIR6_KEYS_STOP:=/tmp/.air6_failsafe_keys_stop}"
+: "${AIR6_FAILSAFE_FLAG:=/tmp/failsafe}"
+AIR6_KEYS_PID=
+AIR6_KEYS_DEBUGFS_MOUNTED=
+
+# air6_key_pressed LINE: true when a debugfs gpio line shows its key pressed.
+air6_key_pressed() {
+	case "$1" in
+	*" in  lo "*"ACTIVE LOW"*) return 0 ;;
+	*" in  hi "*"ACTIVE LOW"*) return 1 ;;
+	*" in  hi "*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+# A key counts as pressed when two passes in a row read it pressed.
+air6_failsafe_keys_poll() {
+	local line name pressed prev= drop=
+	type air6_drop_level_trigger >/dev/null 2>&1 && drop=1
+
+	while [ ! -e "$AIR6_KEYS_STOP" ]; do
+		if [ -n "$drop" ] && [ -e "$AIR6_FAILSAFE_BUTTON" ] && ! air6_drop_level_trigger; then
+			return 0
+		fi
+		pressed=
+		while read -r line; do
+			case "$line" in
+			*"|RESET_KEY "*) name=reset ;;
+			*"|WPS_KEY "*) name=wps ;;
+			*) continue ;;
+			esac
+			air6_key_pressed "$line" && pressed="$pressed $name"
+		done < "$AIR6_KEYS_GPIO"
+		for name in $pressed; do
+			case " $prev " in
+			*" $name "*)
+				echo "$name" > "$AIR6_FAILSAFE_BUTTON"
+				return 0
+				;;
+			esac
+		done
+		prev="$pressed"
+	done
+}
+
+air6_failsafe_keys_start() {
+	[ "$(board_name)" = "softbank,air6" ] || return 0
+	[ "$pi_preinit_no_failsafe" = "y" ] && return 0
+	if [ "$AIR6_KEYS_GPIO" = /sys/kernel/debug/gpio ] && ! grep -qs ' /sys/kernel/debug ' /proc/mounts; then
+		mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null && AIR6_KEYS_DEBUGFS_MOUNTED=1
+	fi
+	if ! grep -qsE '\|(WPS|RESET)_KEY ' "$AIR6_KEYS_GPIO"; then
+		echo "- air6: key GPIOs not readable, failsafe by key only through the hotplug events -"
+		[ -n "$AIR6_KEYS_DEBUGFS_MOUNTED" ] && umount /sys/kernel/debug 2>/dev/null
+		AIR6_KEYS_DEBUGFS_MOUNTED=
+		return 0
+	fi
+	rm -f "$AIR6_KEYS_STOP"
+	air6_failsafe_keys_poll &
+	AIR6_KEYS_PID=$!
+}
+
+air6_failsafe_keys_stop() {
+	if [ -n "$AIR6_KEYS_PID" ]; then
+		touch "$AIR6_KEYS_STOP"
+		wait "$AIR6_KEYS_PID" 2>/dev/null
+		rm -f "$AIR6_KEYS_STOP"
+		AIR6_KEYS_PID=
+		[ -n "$AIR6_KEYS_DEBUGFS_MOUNTED" ] && umount /sys/kernel/debug 2>/dev/null
+		AIR6_KEYS_DEBUGFS_MOUNTED=
+	fi
+	air6_failsafe_keys_latch
+	return 0
+}
+
+# A RESET/WPS trigger that air6_drop_level_trigger put back may have been away from its file exactly when
+# failsafe_wait looked. Runs in the preinit shell after failsafe_wait and before run_failsafe_hook, and sets what
+# failsafe_wait would have set.
+air6_failsafe_keys_latch() {
+	local key
+	[ -e "$AIR6_FAILSAFE_BUTTON.air6-kept" ] || return 0
+	{ read -r key < "$AIR6_FAILSAFE_BUTTON.air6-kept"; } 2>/dev/null
+	rm -f "$AIR6_FAILSAFE_BUTTON.air6-kept"
+	[ "$pi_preinit_no_failsafe" = "y" ] && return 0
+	[ "$FAILSAFE" = "true" ] && return 0
+	echo "- failsafe button ${key:-unknown} was pressed -"
+	FAILSAFE=true
+	export FAILSAFE
+	touch "$AIR6_FAILSAFE_FLAG"
+}
+
+boot_hook_add preinit_main air6_failsafe_keys_start

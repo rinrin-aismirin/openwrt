@@ -1,0 +1,3 @@
+# After failsafe_wait (30_failsafe_wait): stop the key poll of 29_air6_failsafe_keys and turn a latched RESET/WPS
+# trigger into FAILSAFE (air6_failsafe_keys_latch), before run_failsafe_hook (40_run_failsafe_hook).
+boot_hook_add preinit_main air6_failsafe_keys_stop
