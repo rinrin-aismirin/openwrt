@@ -1,0 +1,88 @@
+From: OpenWrt MT6990 repair <mt6990@local>
+Subject: [PATCH] net: ethernet: mediatek: log what schedules an MT6990 warm reset
+
+On MT6990 the upstream warm reset (mtk_pending_work) can be scheduled by a
+TX timeout with an FE error status or by the DMA monitor. It dumps the FE
+registers but does not say which of them scheduled it, and it does not log
+when the work has finished.
+
+This matters more on MT6990 than on the SoCs the code was written for:
+- the MT6990 vendor SDK drivers (Linux 5.4 and 5.15) have no runtime reset
+  at all: the FE reset in mtk_hw_init() is commented out and the tx timeout
+  and pending work are compiled out;
+- the DMA monitor heuristics come from MT798x; MediaTek's own 6.6/6.12 SDK
+  no longer starts a warm reset from them unless forced through debugfs;
+- the modem MEDMCU programs FDMA registers inside the FE block, and the warm
+  reset asserts the FE reset.
+
+On MT6990, log the trigger (TX timeout, or the WDMA, QDMA or ADMA check of
+the DMA monitor) when a warm reset is scheduled, and log when the work has
+finished. Behaviour is unchanged. Other SoCs are not affected.
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -3763,6 +3763,22 @@ static void mtk_dma_free(struct mtk_eth
+ 	}
+ }
+ 
++/* MT6990: name the trigger of each warm reset (mtk_pending_work).
++ *
++ * The MT6990 vendor SDK drivers (5.4 and 5.15) never reset FE at runtime:
++ * their tx timeout and pending work are compiled out. The DMA monitor below
++ * comes from MT798x, and MediaTek's own 6.6/6.12 SDK no longer starts a
++ * warm reset from it unless asked to. On MT6990 the modem MEDMCU also
++ * programs FDMA registers inside the FE block, and the warm reset asserts
++ * the FE reset. Log what scheduled the reset so that a reset on this SoC
++ * can be traced before deciding whether to keep the automatic triggers.
++ */
++static void mtk_mt6990_log_reset_trigger(struct mtk_eth *eth, const char *what)
++{
++	if (MTK_HAS_CAPS(eth->soc->caps, MTK_SOC_MT6990))
++		dev_warn(eth->dev, "MT6990 warm reset scheduled: %s\n", what);
++}
++
+ static bool mtk_hw_reset_check(struct mtk_eth *eth)
+ {
+ 	u32 val = mtk_r32(eth, MTK_INT_STATUS2);
+@@ -3807,6 +3823,7 @@ static void mtk_tx_timeout(struct net_de
+ 
+ 	eth->netdev[mac->id]->stats.tx_errors++;
+ 	netif_err(eth, tx_err, dev, "transmit timed out\n");
++	mtk_mt6990_log_reset_trigger(eth, "TX timeout with an FE error status");
+ 
+ 	schedule_work(&eth->pending_work);
+ }
+@@ -4668,6 +4685,7 @@ static bool mtk_hw_check_dma_hang(struct
+ 		if (++eth->reset.wdma_hang_count > 2) {
+ 			eth->reset.wdma_hang_count = 0;
+ 			ret = true;
++			mtk_mt6990_log_reset_trigger(eth, "DMA monitor, WDMA hang");
+ 		}
+ 		goto out;
+ 	}
+@@ -4689,6 +4707,7 @@ static bool mtk_hw_check_dma_hang(struct
+ 		if (++eth->reset.qdma_hang_count > 2) {
+ 			eth->reset.qdma_hang_count = 0;
+ 			ret = true;
++			mtk_mt6990_log_reset_trigger(eth, "DMA monitor, QDMA hang");
+ 		}
+ 		goto out;
+ 	}
+@@ -4703,6 +4722,7 @@ static bool mtk_hw_check_dma_hang(struct
+ 		if (++eth->reset.adma_hang_count > 2) {
+ 			eth->reset.adma_hang_count = 0;
+ 			ret = true;
++			mtk_mt6990_log_reset_trigger(eth, "DMA monitor, ADMA hang");
+ 		}
+ 		goto out;
+ 	}
+@@ -5114,6 +5134,9 @@ static void mtk_pending_work(struct work
+ 
+ 	clear_bit(MTK_RESETTING, &eth->state);
+ 
++	if (MTK_HAS_CAPS(eth->soc->caps, MTK_SOC_MT6990))
++		dev_warn(eth->dev, "MT6990 warm reset work finished\n");
++
+ 	mtk_wed_fe_reset_complete();
+ 
+ 	rtnl_unlock();
