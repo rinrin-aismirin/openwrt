@@ -125,7 +125,10 @@ static int mt6990_sgmii_phy_configure(struct phy *phy)
 			   MT6990_SGMII_PLL_EN, MT6990_SGMII_PLL_EN);
 
 	/* Exact SDK mtk_sgmii_phy_gen2() sequence selected by the MT6990
-	 * CONFIG_MEDIATEK_NETSYS_V2=y kernel configuration.
+	 * CONFIG_MEDIATEK_NETSYS_V2=y kernel configuration. The same sequence
+	 * is in MediaTek's GPL-2.0 drivers/misc/mediatek/ethernet/mtk_sgmii.c
+	 * in the GPL source packages for the SoftBank Air 6 and the TP-Link
+	 * Deco BE25-5G.
 	 */
 	mt6990_sgmii_rmw(priv, 0x00f4, BIT(0) | BIT(5), BIT(0) | BIT(5));
 	mt6990_sgmii_rmw(priv, 0x0030, GENMASK(31, 10), 3 << 10);
