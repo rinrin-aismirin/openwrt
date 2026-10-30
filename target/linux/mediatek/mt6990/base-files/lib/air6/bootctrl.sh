@@ -14,8 +14,8 @@
 # The record is written with one 10-byte write, then flushed and read back. "Verified" means that read-back
 # matched; it does not mean the write is atomic against a power cut.
 #
-# Overrides for host tests only: BC_MISC_DEV, BC_CMDLINE, BC_LOCK, BC_LOCK_TRIES, BC_FUNCTIONS (and in air6-slot:
-# AIR6_SLOT_LIB, AIR6_SLOT_RUN, AIR6_SLOT_ETC, AIR6_UPTIME).
+# Overrides for host tests only: BC_MISC_DEV, BC_CMDLINE, BC_LOCK, BC_LOCK_TRIES, BC_RESERVATION, BC_FUNCTIONS (and
+# in air6-slot: AIR6_SLOT_LIB, AIR6_SLOT_RUN, AIR6_SLOT_ETC, AIR6_UPTIME).
 
 BC_MAGIC_OFF=2052
 BC_REC_OFF=2060
@@ -25,6 +25,7 @@ BC_PRIO_LOW=0e
 : "${BC_CMDLINE:=/proc/cmdline}"
 : "${BC_LOCK:=/tmp/lock/air6-bootctrl.lock}"
 : "${BC_LOCK_TRIES:=10}"
+: "${BC_RESERVATION:=/tmp/air6-update}"
 : "${BC_FUNCTIONS:=/lib/functions.sh}"
 
 # bc_cmdline_value KEY: the value of the single KEY= token on the kernel command line; fails if absent or repeated.
@@ -144,7 +145,8 @@ bc_with_lock() {
 	(
 		i=0
 		mkdir -p "$(dirname "$BC_LOCK")" 2>/dev/null
-		exec 9>"$BC_LOCK" || exit 5
+		# 'command' strips exec's special-builtin status: a failed redirection then returns non-zero instead of exiting.
+		{ command exec 9>"$BC_LOCK"; } 2>/dev/null || { echo "cannot open or create $BC_LOCK" >&2; exit 5; }
 		command -v flock >/dev/null || { echo "flock not available" >&2; exit 5; }
 		while :; do
 			flock -n 9; rc=$?
@@ -179,4 +181,61 @@ bc_mark_success() {
 # bc_reset_retry REC SLOT
 bc_reset_retry() {
 	bc_set "$1" "$2" retry 00
+}
+
+# Writers of a slot that is not booted (restore-stock, later sysupgrade) use two transitions around the partition
+# writes: bc_invalidate before the first write, bc_activate_written after all writes were read back.
+
+# bc_invalidate REC TARGET: TARGET unsuccessful, so that neither a manual selection nor the LEVEL switch picks a
+# half-written slot. Refused for the booted slot.
+bc_invalidate() {
+	[ "$2" != "$BC_CUR" ] || return 3
+	bc_set "$1" "$2" success 00
+}
+
+# bc_activate_written REC TARGET: TARGET boots next as a trial of the preloader (success 00, retry preset 02, so two
+# boots before the preloader returns to the booted slot). TARGET must be invalidated and must not be the booted slot;
+# the booted slot keeps its success and retry.
+bc_activate_written() {
+	local r="$1" t="$2"
+	[ "$t" != "$BC_CUR" ] && [ "$(bc_get "$r" "$t" success)" = 00 ] || return 3
+	r="$(bc_set "$r" "$t" retry 02)"
+	r="$(bc_set "$r" "$t" prio "$BC_PRIO_HIGH")"
+	bc_set "$r" "$(bc_opposite "$t")" prio "$BC_PRIO_LOW"
+}
+
+# Update reservation: a file that marks a running write of the other slot. It is separate from the short lock (a
+# writer holds it for minutes) and lives in /tmp, so it ends with the boot; bc_invalidate keeps a half-written slot
+# unselectable after that. Create and remove it with the lock held. Content: one line of KEY=VALUE fields, the first
+# being token=.
+
+# bc_reservation: print the reservation and succeed if one exists.
+bc_reservation() {
+	[ -e "$BC_RESERVATION" ] || return 1
+	cat "$BC_RESERVATION" 2>/dev/null || echo "token=unreadable"
+}
+
+# bc_reserve TOKEN FIELDS: create the reservation; 4 if one exists, 5 if it cannot be stored.
+bc_reserve() {
+	local line="token=$1 $2"
+	[ -e "$BC_RESERVATION" ] && { echo "an update is in progress: $(bc_reservation)" >&2; return 4; }
+	mkdir -p "$(dirname "$BC_RESERVATION")" 2>/dev/null
+	( umask 077; echo "$line" > "$BC_RESERVATION.tmp" ) 2>/dev/null && mv "$BC_RESERVATION.tmp" "$BC_RESERVATION" 2>/dev/null &&
+		[ "$(cat "$BC_RESERVATION" 2>/dev/null)" = "$line" ] && return 0
+	rm -f "$BC_RESERVATION.tmp" 2>/dev/null
+	echo "update reservation not stored in $BC_RESERVATION" >&2
+	return 5
+}
+
+# bc_reservation_owned TOKEN: the reservation exists and carries TOKEN.
+bc_reservation_owned() {
+	case "$(bc_reservation)" in "token=$1 "*|"token=$1") return 0 ;; esac
+	return 1
+}
+
+# bc_release TOKEN: remove the reservation if it carries TOKEN; 3 if it is another one, 0 if there is none.
+bc_release() {
+	[ -e "$BC_RESERVATION" ] || return 0
+	bc_reservation_owned "$1" || { echo "the update reservation belongs to another run: $(bc_reservation)" >&2; return 3; }
+	rm -f "$BC_RESERVATION" || return 5
 }

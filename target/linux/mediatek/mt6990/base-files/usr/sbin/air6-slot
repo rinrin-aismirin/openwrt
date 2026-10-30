@@ -6,7 +6,8 @@
 #   air6-slot boot-done         (init, end of boot) mark the booted slot successful; reset the other slot's retry
 #                               when it is above 3, recording it first when that slot never succeeded. Not a health
 #                               check. Safe to run again after a failed write.
-#   air6-slot set-active SLOT   boot SLOT (a or b) next time; SLOT must be successful. Does not reboot.
+#   air6-slot set-active SLOT   boot SLOT (a or b) next time; SLOT must be successful and no update of the other
+#                               slot may be running (exit 4). Does not reboot.
 #   air6-slot trial arm         (init, early boot) trial image whose booted slot is not successful yet: return to
 #                               the other slot and reboot after 600 s unless 'trial commit' runs first
 #   air6-slot trial commit      accept the trial slot: mark it successful and cancel the timer
@@ -31,7 +32,7 @@ EXPIRE_PAUSE=5
 
 log() { logger -t "$TAG" "$*" 2>/dev/null; echo "$*"; }
 err() { logger -t "$TAG" "error: $*" 2>/dev/null; echo "error: $*" >&2; }
-usage() { sed -n '4,12p' "$0" >&2; exit 2; }
+usage() { sed -n '4,13p' "$0" >&2; exit 2; }
 
 is_trial() { tr -s ' \t\n' '\n' < "$BC_CMDLINE" 2>/dev/null | grep -qFx air6.trial=1; }
 : "${AIR6_UPTIME:=/proc/uptime}"
@@ -100,6 +101,8 @@ do_boot_done() {
 
 do_set_active() {
 	local r n rc
+	bc_reservation >/dev/null &&
+		{ err "an update of the other slot is in progress ($(bc_reservation)); nothing changed"; return 4; }
 	r="$(bc_read)" || return 5
 	bc_valid "$r" || { err "unexpected boot control record $r; nothing changed"; return 5; }
 	n="$(bc_select_successful "$r" "$1")" ||
@@ -126,6 +129,7 @@ do_status() {
 		echo "slot $s: prio=$(bc_get "$r" $s prio) retry=$(bc_get "$r" $s retry) success=$(bc_get "$r" $s success) uptype=$(bc_get "$r" $s uptype)"
 	done
 	bc_valid "$r" || echo "warning: unexpected boot control record $r"
+	bc_reservation >/dev/null && echo "update in progress: $(bc_reservation)"
 	if is_trial; then
 		echo "policy=trial"
 		set -- $(timer_get)
