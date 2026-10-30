@@ -1,0 +1,804 @@
+#!/bin/sh
+# Backup and restore of a stock firmware slot of the SoftBank Air 6.
+#
+#   air6-stock backup SLOT -                  SLOT (a or b) must be the other slot and hold stock: read its 15 per-slot
+#                                             partitions once, stream a tar of them to stdout, keep a pending marker
+#   air6-stock confirm SLOT BACKUP_ID DIGEST  make the pending marker of SLOT valid (exact match required); the same
+#                                             valid marker again is 0
+#   air6-stock verify SLOT                    valid marker for SLOT, SLOT holds stock, its 13 non-boot/rootfs
+#                                             partitions match the marker (a point-in-time result, not a reservation)
+#   air6-stock stage                          create a private run directory for a restore and print its path
+#   air6-stock restore SLOT DIR               write mcf1, mcf2, boot and rootfs of SLOT from the backup in DIR (from
+#                                             'stage': META, SHA256SUMS and those 4 images), read them back, then make
+#                                             SLOT the next boot slot as a trial (retry 02). Never reboots.
+#   air6-stock result DIR                     print the outcome of the restore run in DIR
+#
+# Exit codes: 0 done, 2 usage, 3 refused (nothing changed), 4 busy (nothing changed), 5 environment or read error
+# (nothing changed), 6 failed after a write was started (restore: see its phase; the target stays unsuccessful).
+# 'result' exits 0 for a finished run (its own rc is in the output), 3 when DIR holds no result, 4 while the run is
+# still going, 5 when the run ended without a final result.
+#
+# Partitions of one slot <name>_<slot>, resolved only by PARTNAME (/sys/block/mmcblk0/mmcblk0p*/uevent):
+#   fixed (never written): connsys_gnss md1img md1dsp spmfw pi_img dpm medmcu sspm mcupm lk tee
+#   restored:              mcf1 mcf2 boot rootfs
+# Unit identity: the ext4 UUIDs of the shared nvcfg, nvdata, protect1, protect2 (fail closed when one is unreadable,
+# empty or all zero). It identifies the recorded file systems, not the hardware.
+#
+# Archive (tar, uncompressed): exactly META, SHA256SUMS and the 15 <name>_<slot>.img, in this order.
+#   META: key=value lines in this fixed order, parsed and never sourced:
+#     format=air6-stock-backup/1, backup_id=<32 hex, random>, slot=<a|b>,
+#     unit=<uuid nvcfg>,<uuid nvdata>,<uuid protect1>,<uuid protect2> (32 hex each),
+#     created=<UTC, YYYY-mm-ddTHH:MM:SSZ; the unit clock may be wrong>, stock_version=<knos-release field 8 or
+#     unknown>, md1img_version=<MOLY..._V.._.._P.. from md1img or unknown>, then size_<name>_<slot>=<bytes> for the
+#     15 partitions (fixed group first, then mcf1 mcf2 boot rootfs)
+#   SHA256SUMS: "<sha256>  <member>" for META and the 15 images, in archive order. DIGEST = sha256 of SHA256SUMS.
+# Files:
+#   /etc/air6-slot/stock-backup-<slot>          valid marker (0600): META lines, digest=<DIGEST>, SHA256SUMS lines
+#   /etc/air6-slot/stock-backup-<slot>.pending  candidate marker, same content
+#   /tmp/air6-update                            update reservation (bootctrl.sh), held by backup and restore
+#   /tmp/air6-stock/run.XXXXXX                  run directories from 'stage'; a restore writes DIR/result there and
+#                                               removes the 4 uploaded images when it ends (a run directory is used once)
+#   /var/lock/air6-modem.lock                   modem/NV lock, held by backup, verify and restore (created if missing)
+#
+# Overrides for host tests only: AIR6_STOCK_LIB, AIR6_STOCK_ETC, AIR6_STOCK_TMP, AIR6_STOCK_RUN, AIR6_STOCK_LOCK,
+# AIR6_STOCK_MODEM_LOCK, AIR6_STOCK_MODEM_DETACHED, AIR6_STOCK_SYS, AIR6_STOCK_DEV, AIR6_STOCK_PROC (and those of
+# bootctrl.sh: BC_MISC_DEV, BC_CMDLINE, BC_LOCK, BC_LOCK_TRIES, BC_RESERVATION).
+
+. "${AIR6_STOCK_LIB:-/lib/air6/bootctrl.sh}"
+
+TAG=air6-stock
+FORMAT=air6-stock-backup/1
+FIXED="connsys_gnss md1img md1dsp spmfw pi_img dpm medmcu sspm mcupm lk tee"
+RESTORED="mcf1 mcf2 boot rootfs"
+ALL="$FIXED $RESTORED"
+NVID="nvcfg nvdata protect1 protect2"
+META_KEYS="format backup_id slot unit created stock_version md1img_version"
+VER_RE='MOLY[A-Z0-9_]*_V[0-9]*_[0-9]*_P[0-9]*'
+: "${AIR6_STOCK_ETC:=/etc/air6-slot}"
+: "${AIR6_STOCK_TMP:=/tmp}"
+: "${AIR6_STOCK_RUN:=/tmp/air6-stock}"
+: "${AIR6_STOCK_LOCK:=/tmp/lock/air6-stock.lock}"
+: "${AIR6_STOCK_MODEM_LOCK:=/var/lock/air6-modem.lock}"
+: "${AIR6_STOCK_MODEM_DETACHED:=/var/run/air6-modem.detached}"
+: "${AIR6_STOCK_SYS:=/sys}"
+: "${AIR6_STOCK_DEV:=/dev}"
+: "${AIR6_STOCK_PROC:=/proc}"
+# Free space (KiB) kept in /tmp beyond the staged images of a backup, and the minimum free space for a restore (its
+# images are already uploaded; it adds only small files).
+BACKUP_MARGIN_KB=16384
+RESTORE_MIN_KB=4096
+
+N_ALL=$(echo $ALL | wc -w)
+N_META=$(($(echo $META_KEYS | wc -w) + N_ALL))
+N_SUMS=$((N_ALL + 1))
+
+umask 077
+
+REPORT=
+out() { REPORT="$REPORT$*
+"; echo "$*"; }
+log() { logger -t "$TAG" "$*" 2>/dev/null; out "$*"; }
+err() {
+	REPORT="${REPORT}error: $*
+"
+	logger -t "$TAG" "error: $*" 2>/dev/null
+	echo "error: $*" >&2
+}
+usage() { sed -n '4,14p' "$0" >&2; exit 2; }
+
+is_slot() { case "$1" in a|b) return 0 ;; esac; return 1; }
+is_hex() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = "$2" ]; }
+boot_id() { cat "$AIR6_STOCK_PROC/sys/kernel/random/boot_id" 2>/dev/null; }
+rand_hex() { head -c 16 /dev/urandom 2>/dev/null | hexdump -v -e '16/1 "%02x"'; }
+now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# sha_of FILE: sha256 of FILE (a path, also a device), or 5.
+sha_of() {
+	local h
+	h="$(sha256sum "$1" 2>/dev/null)" || return 5
+	h="${h%% *}"
+	is_hex "$h" 64 || return 5
+	echo "$h"
+}
+
+# Partitions ------------------------------------------------------------------------------------------------------
+
+# part_scan: PMAP = "<PARTNAME> <sysfs dir>" lines of the eMMC partitions.
+part_scan() {
+	local u n
+	PMAP=
+	for u in "$AIR6_STOCK_SYS"/block/mmcblk0/mmcblk0p*/uevent; do
+		[ -f "$u" ] || continue
+		n="$(sed -n 's/^PARTNAME=//p' "$u")"
+		[ -n "$n" ] && PMAP="$PMAP$n ${u%/uevent}
+"
+	done
+	[ -n "$PMAP" ] || { err "no eMMC partitions found under $AIR6_STOCK_SYS/block/mmcblk0"; return 5; }
+}
+
+# part_sys NAME: the sysfs directory of the single partition named NAME.
+part_sys() {
+	printf '%s' "$PMAP" | awk -v n="$1" '$1 == n { p = $2; c++ } END { if (c != 1) exit 1; print p }'
+}
+
+# resolve NAME VAR: VAR_dev, VAR_sys and VAR_size (bytes) for partition NAME. Names come from the fixed lists only.
+resolve() {
+	local s z
+	s="$(part_sys "$1")" || { err "partition $1 not found (or not unique)"; return 5; }
+	z="$(cat "$s/size" 2>/dev/null)"
+	case "$z" in ''|*[!0-9]*) err "size of partition $1 not readable"; return 5 ;; esac
+	[ "$z" -gt 0 ] || { err "partition $1 is empty"; return 5; }
+	eval "$2_sys=\$s; $2_dev=\$AIR6_STOCK_DEV/\${s##*/}; $2_size=\$((z * 512))"
+	eval "[ -e \"\$$2_dev\" ]" || { err "device of partition $1 missing"; return 5; }
+}
+
+# resolve_slot SLOT: P_<name>_{dev,sys,size} for the 15 partitions of SLOT.
+resolve_slot() {
+	local p
+	for p in $ALL; do resolve "${p}_$1" "P_$p" || return 5; done
+}
+
+pdev() { eval "echo \"\$P_$1_dev\""; }
+psize() { eval "echo \"\$P_$1_size\""; }
+
+# in_use NAME: partition NAME (short name of the slot) is mounted or backs a loop device (also when unknown).
+in_use() {
+	local s d mm l
+	eval "s=\$P_$1_sys; d=\$P_$1_dev"
+	mm="$(cat "$s/dev" 2>/dev/null)"
+	[ -n "$mm" ] && [ -r "$AIR6_STOCK_PROC/self/mountinfo" ] || return 0
+	awk -v mm="$mm" '$3 == mm { f = 1 } END { exit !f }' "$AIR6_STOCK_PROC/self/mountinfo" && return 0
+	for l in "$AIR6_STOCK_SYS"/block/loop*/loop/backing_file; do
+		[ -f "$l" ] && [ "$(cat "$l" 2>/dev/null)" = "$d" ] && return 0
+	done
+	return 1
+}
+
+# check_unused SLOT: none of the 4 restored partitions of SLOT is mounted or used by a loop device.
+check_unused() {
+	local p bad=
+	for p in $RESTORED; do in_use "$p" && bad="$bad ${p}_$1"; done
+	[ -z "$bad" ] && return 0
+	err "in use (mounted or loop device):$bad; nothing changed"
+	return 3
+}
+
+# unit_id: UNIT = the unit identity (see the header), or 5.
+unit_id() {
+	local p m u
+	UNIT=
+	for p in $NVID; do
+		resolve "$p" NV || return 5
+		m="$(dd if="$NV_dev" bs=1 skip=1080 count=2 2>/dev/null | hexdump -v -e '2/1 "%02x"')"
+		u="$(dd if="$NV_dev" bs=1 skip=1128 count=16 2>/dev/null | hexdump -v -e '16/1 "%02x"')"
+		[ "$m" = 53ef ] || { err "$p holds no ext4 file system; unit identity unknown"; UNIT=; return 5; }
+		is_hex "$u" 32 && [ "$u" != 00000000000000000000000000000000 ] ||
+			{ err "ext4 UUID of $p unreadable or empty; unit identity unknown"; UNIT=; return 5; }
+		UNIT="$UNIT${UNIT:+,}$u"
+	done
+}
+
+# Locks and the update reservation --------------------------------------------------------------------------------
+
+# modem_lock: hold the modem/NV lock until the end of the process. The file is created when missing: the modem
+# runtime and the NV tool create it the same way and give its existence no meaning.
+modem_lock() {
+	mkdir -p "$(dirname "$AIR6_STOCK_MODEM_LOCK")" 2>/dev/null
+	# 'command' strips exec's special-builtin status: a failed redirection then returns non-zero instead of exiting.
+	{ command exec 8>>"$AIR6_STOCK_MODEM_LOCK"; } 2>/dev/null || { err "cannot open or create $AIR6_STOCK_MODEM_LOCK"; return 5; }
+	flock -n 8 || { err "the modem service or an NV operation holds $AIR6_STOCK_MODEM_LOCK; nothing changed"; return 4; }
+}
+
+# with_marker_lock CMD [ARGS]: run CMD in a subshell holding the marker lock (short, finite wait).
+with_marker_lock() {
+	(
+		i=0
+		mkdir -p "$(dirname "$AIR6_STOCK_LOCK")" 2>/dev/null
+		# 'command' strips exec's special-builtin status: a failed redirection then returns non-zero instead of exiting.
+		{ command exec 7>"$AIR6_STOCK_LOCK"; } 2>/dev/null ||
+			{ echo "error: cannot open or create $AIR6_STOCK_LOCK" >&2; exit 5; }
+		command -v flock >/dev/null || { echo "flock not available" >&2; exit 5; }
+		while ! flock -n 7; do
+			i=$((i + 1))
+			[ "$i" -lt "$BC_LOCK_TRIES" ] || { echo "error: the backup marker is busy" >&2; exit 4; }
+			sleep 1
+		done
+		"$@"
+	)
+}
+
+res_field() { echo "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -n 1; }
+
+# reservation_free: succeed when there is no update reservation; otherwise describe it (also a stale one, which is
+# never taken over). Call with the boot control lock held.
+reservation_free() {
+	local line bid pid
+	line="$(bc_reservation)" || return 0
+	bid="$(res_field "$line" boot_id)"; pid="$(res_field "$line" pid)"
+	if [ -z "$bid" ] || [ "$bid" != "$(boot_id)" ]; then
+		echo "error: stale update reservation from another boot ($line); not taken over (it ends with a reboot)" >&2
+	elif [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+		echo "error: stale update reservation, its process $pid is gone ($line); not taken over (it ends with a reboot)" >&2
+	else
+		echo "error: an update of the other slot is in progress ($line)" >&2
+	fi
+	return 1
+}
+
+# reserve_locked TOKEN FIELDS: (boot control lock held) create the reservation unless one exists.
+reserve_locked() {
+	reservation_free || return 4
+	bc_reserve "$1" "$2"
+}
+
+# release TOKEN: remove our reservation under the boot control lock; prints what happened.
+release() {
+	local m rc
+	m="$(bc_with_lock bc_release "$1" 2>&1)"; rc=$?
+	if [ "$rc" = 0 ]; then
+		RES_TOKEN=
+		out "update reservation removed"
+	else
+		err "update reservation token=$1 NOT removed (rc $rc${m:+: $m}); 'air6-slot set-active' stays refused until it is removed or the unit reboots"
+	fi
+	return "$rc"
+}
+
+# META, SHA256SUMS and markers ------------------------------------------------------------------------------------
+
+# meta_check FILE SLOT: FILE (- for stdin) is a well-formed META of SLOT.
+meta_check() {
+	awk -v slot="$2" -v keys="$META_KEYS" -v parts="$ALL" -v format="$FORMAT" '
+		function hex(v, n) { return length(v) == n && v !~ /[^0-9a-f]/ }
+		BEGIN {
+			n = split(keys, K, " "); np = split(parts, P, " ")
+			for (i = 1; i <= np; i++) K[n + i] = "size_" P[i] "_" slot
+			total = n + np
+		}
+		{
+			if (NR > total) { bad = 1; exit }
+			eq = index($0, "="); k = substr($0, 1, eq - 1); v = substr($0, eq + 1)
+			if (eq < 2 || k != K[NR]) { bad = 1; exit }
+			if (k == "format") ok = (v == format)
+			else if (k == "backup_id") ok = hex(v, 32)
+			else if (k == "slot") ok = (v == slot)
+			else if (k == "unit") {
+				ok = (split(v, U, ",") == 4)
+				for (i = 1; i <= 4; i++) if (!hex(U[i], 32)) ok = 0
+				if (length(v) != 131) ok = 0
+			}
+			else if (k == "created") ok = (v ~ /^[0-9]+-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/)
+			else if (k == "stock_version" || k == "md1img_version")
+				ok = (v != "" && length(v) <= 80 && v !~ /[^0-9A-Za-z._+-]/)
+			else ok = (v ~ /^[1-9][0-9]*$/ && length(v) <= 15)
+			if (!ok) { bad = 1; exit }
+		}
+		END { exit (bad || NR != total) }' "$1"
+}
+
+meta_get() { sed -n "s/^$2=//p" "$1" | head -n 1; }
+
+# sums_check FILE SLOT: FILE (- for stdin) lists META and the 15 images of SLOT, in archive order, nothing else.
+sums_check() {
+	awk -v slot="$2" -v parts="$ALL" '
+		BEGIN { np = split(parts, P, " "); N[1] = "META"; for (i = 1; i <= np; i++) N[i + 1] = P[i] "_" slot ".img"; total = np + 1 }
+		{
+			if (NR > total) { bad = 1; exit }
+			h = substr($0, 1, 64)
+			if (length(h) != 64 || h ~ /[^0-9a-f]/ || substr($0, 65) != "  " N[NR]) { bad = 1; exit }
+		}
+		END { exit (bad || NR != total) }' "$1"
+}
+
+# sums_get FILE MEMBER: the listed hash of MEMBER.
+sums_get() { awk -v n="$2" '$2 == n { print $1; exit }' "$1"; }
+
+# marker_check FILE SLOT: FILE is a complete, self-consistent marker of SLOT. Sets M_META, M_SUMS (temp files in
+# $MT), M_ID, M_DIGEST, M_UNIT. Silent; 1 when not.
+marker_check() {
+	local l
+	[ -f "$1" ] && [ ! -L "$1" ] || return 1
+	[ "$(wc -l < "$1")" = $((N_META + 1 + N_SUMS)) ] || return 1
+	M_META="$MT/marker-meta"; M_SUMS="$MT/marker-sums"
+	sed -n "1,${N_META}p" "$1" > "$M_META" && sed -n "$((N_META + 2)),\$p" "$1" > "$M_SUMS" || return 1
+	meta_check "$M_META" "$2" && sums_check "$M_SUMS" "$2" || return 1
+	l="$(sed -n "$((N_META + 1))p" "$1")"
+	M_DIGEST="${l#digest=}"
+	[ "$l" = "digest=$M_DIGEST" ] && is_hex "$M_DIGEST" 64 || return 1
+	[ "$(sha_of "$M_SUMS")" = "$M_DIGEST" ] || return 1
+	[ "$(sha_of "$M_META")" = "$(sums_get "$M_SUMS" META)" ] || return 1
+	M_ID="$(meta_get "$M_META" backup_id)"; M_UNIT="$(meta_get "$M_META" unit)"
+}
+
+marker() { echo "$AIR6_STOCK_ETC/stock-backup-$1"; }
+
+# Private temp directory for small files of one command (removed on exit).
+mk_mt() {
+	MT="$(mktemp -d "$AIR6_STOCK_TMP/air6-stock-t.XXXXXX")" || { err "cannot create a temporary directory in $AIR6_STOCK_TMP"; return 5; }
+}
+
+# Stock detection -------------------------------------------------------------------------------------------------
+
+# stock_check SLOT: 0 when the squashfs in rootfs_SLOT has /lib/upgrade/bootctrl.sh (sets STOCK_VERSION), 3 when it
+# does not or this cannot be decided, 5 on an environment error. The file system is mounted read-only and unmounted.
+stock_check() {
+	local rc=0 v
+	STOCK_VERSION=unknown
+	MNT="$(mktemp -d "$AIR6_STOCK_TMP/air6-stock-mnt.XXXXXX")" || { MNT=; err "cannot create a mount point"; return 5; }
+	if ! mount -t squashfs -o ro "$P_rootfs_dev" "$MNT" 2>/dev/null; then
+		rmdir "$MNT"; MNT=
+		err "rootfs_$1 cannot be mounted read-only as squashfs: cannot tell whether slot $1 holds stock; nothing changed"
+		return 3
+	fi
+	if [ -f "$MNT/lib/upgrade/bootctrl.sh" ] && [ ! -L "$MNT/lib/upgrade/bootctrl.sh" ]; then
+		v="$(cut -d, -f8 "$MNT/etc/knos-config/knos-release" 2>/dev/null | head -n 1)"
+		case "$v" in ''|*[!0-9A-Za-z._+-]*) ;; *) [ "${#v}" -le 80 ] && STOCK_VERSION="$v" ;; esac
+	else
+		err "slot $1 does not hold the stock firmware (no /lib/upgrade/bootctrl.sh in rootfs_$1); nothing changed"
+		rc=3
+	fi
+	umount "$MNT" 2>/dev/null || { err "cannot unmount $MNT (rootfs_$1 stays mounted read-only)"; MNT=; return 5; }
+	rmdir "$MNT"; MNT=
+	return "$rc"
+}
+
+# Cleanup ---------------------------------------------------------------------------------------------------------
+
+STAGE= MT= MNT= RES_TOKEN=
+cleanup() {
+	[ -n "$MNT" ] && { umount "$MNT" 2>/dev/null && rmdir "$MNT" 2>/dev/null; }
+	case "$STAGE" in "$AIR6_STOCK_TMP"/air6-stock.??????) rm -rf "$STAGE" ;; esac
+	case "$MT" in "$AIR6_STOCK_TMP"/air6-stock-t.??????) rm -rf "$MT" ;; esac
+	[ -n "$RES_TOKEN" ] && release "$RES_TOKEN" >&2
+	STAGE= MT= MNT=
+}
+
+# backup ----------------------------------------------------------------------------------------------------------
+
+do_backup() {
+	local s="$1" unit p total=0 need free id h sums digest rc
+	# Only the tar goes to the original stdout (fd 3).
+	exec 3>&1 1>&2
+	[ "$s" != "$BC_CUR" ] || { err "slot $s is the booted slot; back up the other slot"; return 3; }
+	part_scan && resolve_slot "$s" && unit_id || return 5
+	unit="$UNIT"
+	check_unused "$s" || return 3
+	modem_lock || return $?
+	id="$(rand_hex)"; is_hex "$id" 32 || { err "no random backup id"; return 5; }
+	h="$(rand_hex)"; is_hex "$h" 32 || { err "no random token"; return 5; }
+	bc_with_lock reserve_locked "$h" "boot_id=$(boot_id) pid=$$ target=$s backup_id=$id phase=backup-read"; rc=$?
+	[ "$rc" = 0 ] || return "$rc"
+	RES_TOKEN="$h"
+	stock_check "$s" || return $?
+	for p in $ALL; do total=$((total + $(psize "$p"))); done
+	need=$((total / 1024 + BACKUP_MARGIN_KB))
+	free="$(df -Pk "$AIR6_STOCK_TMP" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+	case "$free" in ''|*[!0-9]*) err "free space of $AIR6_STOCK_TMP unknown"; return 5 ;; esac
+	[ "$free" -ge "$need" ] || { err "not enough space in $AIR6_STOCK_TMP: ${free} KiB free, ${need} KiB needed"; return 5; }
+	STAGE="$(mktemp -d "$AIR6_STOCK_TMP/air6-stock.XXXXXX")" || { STAGE=; err "cannot create the staging directory"; return 5; }
+	chmod 700 "$STAGE" || return 5
+	for p in $ALL; do
+		dd if="$(pdev "$p")" of="$STAGE/${p}_$s.img" bs=1M 2>/dev/null &&
+			[ "$(wc -c < "$STAGE/${p}_$s.img")" = "$(psize "$p")" ] ||
+			{ err "reading ${p}_$s failed; no backup made"; return 5; }
+	done
+	{
+		echo "format=$FORMAT"
+		echo "backup_id=$id"
+		echo "slot=$s"
+		echo "unit=$unit"
+		echo "created=$(now_utc)"
+		echo "stock_version=$STOCK_VERSION"
+		h="$(head -c 262144 "$STAGE/md1img_$s.img" | grep -a -o -m1 "$VER_RE" | head -n 1)"
+		echo "md1img_version=${h:-unknown}"
+		for p in $ALL; do echo "size_${p}_$s=$(psize "$p")"; done
+	} > "$STAGE/META" || { err "cannot write META"; return 5; }
+	meta_check "$STAGE/META" "$s" || { err "META came out malformed: $(tr '\n' ' ' < "$STAGE/META")"; return 5; }
+	sums="$STAGE/SHA256SUMS"
+	: > "$sums" || return 5
+	for p in META $(for p in $ALL; do echo "${p}_$s.img"; done); do
+		h="$(sha_of "$STAGE/$p")" || { err "hashing $p failed"; return 5; }
+		echo "$h  $p" >> "$sums" || return 5
+	done
+	sums_check "$sums" "$s" || { err "SHA256SUMS came out malformed"; return 5; }
+	digest="$(sha_of "$sums")" || return 5
+	{ cat "$STAGE/META"; echo "digest=$digest"; cat "$sums"; } > "$STAGE/marker" || return 5
+	(cd "$STAGE" && tar -cf - META SHA256SUMS $(for p in $ALL; do echo "${p}_$s.img"; done)) >&3 ||
+		{ err "streaming the archive failed; no pending marker written"; return 5; }
+	exec 3>&-
+	with_marker_lock write_pending "$STAGE/marker" "$s"; rc=$?
+	[ "$rc" = 0 ] || { err "archive sent, but the pending marker was not stored; do not confirm this backup"; return 5; }
+	log "slot $s backed up: backup_id=$id digest=$digest stock_version=$STOCK_VERSION (pending; confirm after the archive was checked and saved: air6-stock confirm $s $id $digest)"
+}
+
+# write_pending FILE SLOT: (marker lock held) FILE becomes the pending marker of SLOT; the valid one is not touched.
+write_pending() {
+	local p t
+	p="$(marker "$2").pending"; t="$AIR6_STOCK_ETC/.stock-backup-$2.pending.tmp"
+	mkdir -p "$AIR6_STOCK_ETC" 2>/dev/null
+	rm -f "$t"
+	cp "$1" "$t" 2>/dev/null && chmod 600 "$t" && mv -f "$t" "$p" 2>/dev/null || { rm -f "$t"; return 5; }
+	sync
+	cmp -s "$1" "$p" || return 5
+}
+
+# confirm ---------------------------------------------------------------------------------------------------------
+
+# do_confirm SLOT ID DIGEST: (marker lock held)
+do_confirm() {
+	local s="$1" v p h
+	v="$(marker "$s")"; p="$v.pending"
+	if marker_check "$p" "$s" && [ "$M_ID" = "$2" ] && [ "$M_DIGEST" = "$3" ]; then
+		h="$(sha_of "$p")" || { err "cannot read $p"; return 5; }
+		mv -f "$p" "$v" 2>/dev/null || { err "cannot rename $p to $v; nothing changed"; return 5; }
+		sync
+		if [ "$(sha_of "$v")" = "$h" ] && marker_check "$v" "$s" && [ "$M_ID" = "$2" ] &&
+			[ -n "$(find "$v" -maxdepth 0 -type f -perm 600 2>/dev/null)" ]; then
+			log "slot $s backup $2 confirmed (marker $v)"
+			return 0
+		fi
+		err "marker $v does not read back as confirmed; back up again"
+		return 6
+	fi
+	if marker_check "$v" "$s" && [ "$M_ID" = "$2" ] && [ "$M_DIGEST" = "$3" ]; then
+		out "slot $s backup $2 is already confirmed"
+		return 0
+	fi
+	if marker_check "$p" "$s"; then
+		err "the pending backup of slot $s is $M_ID with digest $M_DIGEST, not $2 / $3; nothing changed"
+	elif [ -e "$p" ]; then
+		err "the pending marker $p is damaged; nothing changed"
+	else
+		err "no pending backup of slot $s matches $2 / $3; nothing changed"
+	fi
+	return 3
+}
+
+# verify ----------------------------------------------------------------------------------------------------------
+
+do_verify() {
+	local s="$1" v here p h want bad= rc
+	[ "$s" != "$BC_CUR" ] || { err "slot $s is the booted slot"; return 3; }
+	part_scan && resolve_slot "$s" || return 5
+	mk_mt || return 5
+	v="$(marker "$s")"
+	if ! marker_check "$v" "$s"; then
+		if [ -e "$v" ]; then err "the backup marker $v of slot $s is damaged; back up again"
+		elif [ -e "$v.pending" ]; then err "the backup of slot $s was not confirmed yet ($v.pending)"
+		else err "no confirmed backup of slot $s ($v missing)"
+		fi
+		return 3
+	fi
+	unit_id || return 5
+	here="$UNIT"
+	[ "$M_UNIT" = "$here" ] || { err "the backup marker of slot $s is from another unit ($M_UNIT, this unit $here)"; return 3; }
+	for p in $ALL; do
+		[ "$(meta_get "$M_META" "size_${p}_$s")" = "$(psize "$p")" ] ||
+			{ err "partition ${p}_$s has another size than in the backup"; return 3; }
+	done
+	stock_check "$s" || return $?
+	modem_lock || return $?
+	for p in $FIXED mcf1 mcf2; do
+		h="$(sha_of "$(pdev "$p")")" || { err "reading ${p}_$s failed"; return 5; }
+		want="$(sums_get "$M_SUMS" "${p}_$s.img")"
+		if [ "$h" = "$want" ]; then out "${p}_$s: matches"
+		else out "${p}_$s: DIFFERS (backup $want, now $h)"; bad="$bad ${p}_$s"
+		fi
+	done
+	if [ -n "$bad" ]; then
+		err "verify slot $s: FAILED, differs from the confirmed backup $M_ID:$bad"
+		return 3
+	fi
+	out "verify slot $s: OK, the 13 partitions match the confirmed backup $M_ID ($(meta_get "$M_META" created), stock $(meta_get "$M_META" stock_version)); slot $s holds stock. This is a point-in-time result."
+}
+
+# stage -----------------------------------------------------------------------------------------------------------
+
+private_dir() { [ -d "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -type d -user "$(id -u)" -perm 700 2>/dev/null)" ]; }
+
+do_stage() {
+	local d
+	[ -L "$AIR6_STOCK_RUN" ] && { err "$AIR6_STOCK_RUN is a symbolic link"; return 5; }
+	[ -d "$AIR6_STOCK_RUN" ] || mkdir -m 700 "$AIR6_STOCK_RUN" || { err "cannot create $AIR6_STOCK_RUN"; return 5; }
+	private_dir "$AIR6_STOCK_RUN" || { err "$AIR6_STOCK_RUN is not a private directory"; return 5; }
+	d="$(mktemp -d "$AIR6_STOCK_RUN/run.XXXXXX")" || { err "cannot create a run directory"; return 5; }
+	chmod 700 "$d" || return 5
+	echo "$d"
+}
+
+# stage_dir_ok DIR: DIR is a run directory made by 'stage' (name, type, owner, mode).
+stage_dir_ok() {
+	local b=
+	case "$1" in "$AIR6_STOCK_RUN"/run.??????) b="${1#"$AIR6_STOCK_RUN"/run.}" ;; esac
+	case "$b" in ''|*[!A-Za-z0-9]*) err "$1 is not a run directory from 'air6-stock stage'"; return 3 ;; esac
+	private_dir "$AIR6_STOCK_RUN" && private_dir "$1" ||
+		{ err "$1 is not a private (0700) run directory from 'air6-stock stage'"; return 3; }
+}
+
+# restore ---------------------------------------------------------------------------------------------------------
+
+# Run state: RD (run directory), S (slot), PHASE, WROTE (1 once a write was started), RES_TOKEN, BACKUP_ID.
+RD= S= PHASE= WROTE=0 CLAIMED= BACKUP_ID= TOKEN= STARTED= FINAL=
+
+# result_put STATE RC: replace RD/result.
+result_put() {
+	{
+		echo "state=$1"
+		echo "rc=$2"
+		echo "phase=$PHASE"
+		echo "slot=$S"
+		echo "backup_id=$BACKUP_ID"
+		echo "token=$TOKEN"
+		echo "pid=$$"
+		echo "boot_id=$(boot_id)"
+		echo "started=$STARTED"
+		echo "updated=$(now_utc)"
+		echo "--"
+		printf '%s' "$REPORT"
+	} > "$RD/result.tmp" 2>/dev/null && mv -f "$RD/result.tmp" "$RD/result" 2>/dev/null && return 0
+	echo "error: the result could not be saved in $RD/result" >&2
+	return 1
+}
+
+# set_phase PHASE: record the phase in the result (state running).
+set_phase() { PHASE="$1"; result_put running ""; }
+
+# restore_end RC: (once) release the reservation, write the final result, drop the uploaded images.
+restore_end() {
+	local rc="$1" st p
+	[ -z "$FINAL" ] || return "$rc"
+	FINAL=1
+	trap '' INT TERM
+	if [ -n "$RES_TOKEN" ]; then
+		release "$RES_TOKEN" || { [ "$rc" = 0 ] && { rc=6; PHASE=release; }; }
+	fi
+	if [ -n "$CLAIMED" ]; then
+		for p in $RESTORED; do rm -f "$RD/${p}_$S.img"; done
+		out "uploaded images removed from $RD (a retry needs a new 'air6-stock stage' and upload)"
+		case "$rc" in 0) st=done ;; 6) st=failed ;; *) st=refused ;; esac
+		[ "$rc" = 0 ] || out "restore of slot $S: rc $rc in phase $PHASE$([ "$WROTE" = 1 ] && echo "; slot $S stays unsuccessful (not selectable), the booted slot $BC_CUR stays as it was unless reported above")"
+		result_put "$st" "$rc"
+	fi
+	return "$rc"
+}
+
+on_signal() {
+	err "interrupted in phase $PHASE"
+	if [ "$WROTE" = 1 ]; then restore_end 6; exit 6; fi
+	restore_end 5; exit 5
+}
+
+# do_admit SLOT TOKEN FIELDS: (boot control lock held) step 3. Lines starting with @ carry data for the caller.
+do_admit() {
+	local r n rc
+	r="$(bc_read)" || return 5
+	echo "@rec $r"
+	bc_valid "$r" || { echo "error: unexpected boot control record $r; nothing changed" >&2; return 5; }
+	[ "$(bc_next "$r")" = "$BC_CUR" ] ||
+		{ echo "error: the next boot slot is $(bc_next "$r"), not the booted slot $BC_CUR (bootctrl $r); nothing changed" >&2; return 3; }
+	[ "$(bc_get "$r" "$BC_CUR" success)" = 01 ] ||
+		{ echo "error: the booted slot $BC_CUR is not marked successful (bootctrl $r); nothing changed" >&2; return 3; }
+	n="$(bc_invalidate "$r" "$1")" || { echo "error: slot $1 cannot be invalidated; nothing changed" >&2; return 3; }
+	reserve_locked "$2" "$3" || return $?
+	echo "@reserved"
+	bc_write "$r" "$n"; rc=$?
+	echo "@inv $r $n $(bc_read 2>/dev/null || echo unknown)"
+	return "$rc"
+}
+
+# do_activate SLOT TOKEN EXPECTED: (boot control lock held) step 5.
+do_activate() {
+	local r n rc
+	bc_reservation_owned "$2" ||
+		{ echo "error: the update reservation is no longer this run's ($(bc_reservation || echo none)); not activating" >&2; return 3; }
+	r="$(bc_read)" || { echo "error: boot control record not readable; not activating" >&2; return 5; }
+	[ "$r" = "$3" ] ||
+		{ echo "error: the boot control record changed since slot $1 was invalidated ($3 -> $r); not activating" >&2; return 3; }
+	n="$(bc_activate_written "$r" "$1")" || { echo "error: slot $1 cannot be activated from $r; not activating" >&2; return 3; }
+	bc_write "$r" "$n"; rc=$?
+	echo "@act $r $n $(bc_read 2>/dev/null || echo unknown)"
+	return "$rc"
+}
+
+# take_msgs RC TEXT: the message lines of TEXT (not the @ data lines) go to the report, as errors when RC != 0.
+take_msgs() {
+	local l
+	while IFS= read -r l; do
+		l="${l#error: }"
+		case "$l" in @*|'') ;; *) if [ "$1" = 0 ]; then out "$l"; else err "$l"; fi ;; esac
+	done <<EOF
+$2
+EOF
+}
+
+restore_main() {
+	local p f h want got rb bad= names exp a rc free n
+	S="$1" RD="$2" STARTED="$(now_utc)"
+	# 1. Input (no change).
+	PHASE=input
+	stage_dir_ok "$RD" || return 3
+	( set -C; : > "$RD/result" ) 2>/dev/null ||
+		{ err "$RD was already used by a restore run (or is not writable); stage a new run directory"; return 3; }
+	CLAIMED=1
+	set_phase input
+	mk_mt || return 5
+	exp="$(printf '%s\n' META SHA256SUMS result $(for p in $RESTORED; do echo "${p}_$S.img"; done) | sort)"
+	names="$(ls -A "$RD" 2>/dev/null | sort)"
+	[ "$names" = "$exp" ] ||
+		{ err "$RD must hold exactly META, SHA256SUMS and the images of mcf1, mcf2, boot, rootfs of slot $S (found: $(echo $names))"; return 3; }
+	for f in META SHA256SUMS $(for p in $RESTORED; do echo "${p}_$S.img"; done); do
+		[ -f "$RD/$f" ] && [ ! -L "$RD/$f" ] || { err "$RD/$f is not a regular file"; return 3; }
+	done
+	meta_check "$RD/META" "$S" || { err "META is malformed or not for slot $S"; return 3; }
+	sums_check "$RD/SHA256SUMS" "$S" || { err "SHA256SUMS is malformed or not for slot $S"; return 3; }
+	h="$(sha_of "$RD/META")" || { err "cannot read META"; return 5; }
+	[ "$h" = "$(sums_get "$RD/SHA256SUMS" META)" ] || { err "META does not match SHA256SUMS"; return 3; }
+	BACKUP_ID="$(meta_get "$RD/META" backup_id)"
+	part_scan && resolve_slot "$S" && unit_id || return 5
+	[ "$(meta_get "$RD/META" unit)" = "$UNIT" ] ||
+		{ err "the backup is from another unit (unit $(meta_get "$RD/META" unit), this unit $UNIT); nothing changed"; return 3; }
+	for p in $ALL; do
+		[ "$(meta_get "$RD/META" "size_${p}_$S")" = "$(psize "$p")" ] ||
+			{ err "META size of ${p}_$S differs from the partition ($(psize "$p") bytes)"; return 3; }
+	done
+	for p in $RESTORED; do
+		f="$RD/${p}_$S.img"
+		[ "$(wc -c < "$f")" = "$(psize "$p")" ] || { err "${p}_$S.img has another size than the partition"; return 3; }
+		h="$(sha_of "$f")" || { err "cannot read ${p}_$S.img"; return 5; }
+		[ "$h" = "$(sums_get "$RD/SHA256SUMS" "${p}_$S.img")" ] || { err "${p}_$S.img does not match SHA256SUMS"; return 3; }
+	done
+	free="$(df -Pk "$RD" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+	case "$free" in ''|*[!0-9]*) err "free space of $RD unknown"; return 5 ;; esac
+	[ "$free" -ge "$RESTORE_MIN_KB" ] || { err "not enough space in /tmp: ${free} KiB free, ${RESTORE_MIN_KB} KiB needed"; return 5; }
+	out "input: backup $BACKUP_ID of slot $S, created $(meta_get "$RD/META" created), stock $(meta_get "$RD/META" stock_version), md1img $(meta_get "$RD/META" md1img_version); META, SHA256SUMS and 4 images checked"
+	# 2. Target (no change).
+	set_phase target
+	[ "$S" != "$BC_CUR" ] || { err "slot $S is the booted slot; restore the other slot"; return 3; }
+	[ -e "$AIR6_STOCK_MODEM_DETACHED" ] &&
+		{ err "a modem stop left file systems detached ($AIR6_STOCK_MODEM_DETACHED); reboot first"; return 3; }
+	modem_lock || return $?
+	check_unused "$S" || return 3
+	for p in $FIXED; do
+		h="$(sha_of "$(pdev "$p")")" || { err "reading ${p}_$S failed"; return 5; }
+		[ "$h" = "$(sums_get "$RD/SHA256SUMS" "${p}_$S.img")" ] || bad="$bad ${p}_$S"
+	done
+	[ -z "$bad" ] || { err "slot $S differs from the backup in partitions that are never written:$bad; not restoring"; return 3; }
+	out "target: slot $S not booted, restored partitions not in use, the 11 fixed partitions match the backup"
+	# 3. Admission (one short boot control lock).
+	set_phase admission
+	TOKEN="$(rand_hex)"; is_hex "$TOKEN" 32 || { TOKEN=; err "no random token"; return 5; }
+	a="$(bc_with_lock do_admit "$S" "$TOKEN" "boot_id=$(boot_id) pid=$$ target=$S backup_id=$BACKUP_ID phase=restore-write" 2>&1)"
+	rc=$?
+	take_msgs "$rc" "$a"
+	case "$a" in *@reserved*) RES_TOKEN="$TOKEN" ;; esac
+	rb="$(printf '%s\n' "$a" | sed -n 's/^@inv //p')"
+	if [ -n "$rb" ]; then
+		WROTE=1
+		set -- $rb
+		out "bootctrl invalidate slot $S: old=$1 requested=$2 read-back=$3"
+	fi
+	if [ "$rc" != 0 ]; then
+		[ "$WROTE" = 1 ] && { PHASE=invalidate; err "invalidating slot $S failed; no partition written"; return 6; }
+		[ -n "$RES_TOKEN" ] && return 6
+		return "$rc"
+	fi
+	rb="$3"
+	# 4. Write, flush, drop caches, read back.
+	for p in $RESTORED; do
+		set_phase "write-${p}_$S"
+		dd if="$RD/${p}_$S.img" of="$(pdev "$p")" bs=1M conv=notrunc,fsync 2>/dev/null ||
+			{ err "writing ${p}_$S failed; not activating"; return 6; }
+		out "${p}_$S: written ($(psize "$p") bytes)"
+	done
+	set_phase sync
+	sync
+	set_phase drop-caches
+	echo 3 > "$AIR6_STOCK_PROC/sys/vm/drop_caches" 2>/dev/null ||
+		{ err "dropping the page cache failed; a read-back would not be from the eMMC; not activating"; return 6; }
+	set_phase read-back
+	bad=
+	for p in $RESTORED; do
+		want="$(sums_get "$RD/SHA256SUMS" "${p}_$S.img")"
+		if got="$(sha_of "$(pdev "$p")")"; then
+			if [ "$got" = "$want" ]; then out "${p}_$S: read-back sha256 matches"
+			else out "${p}_$S: read-back sha256 DIFFERS ($got, expected $want)"; bad="$bad ${p}_$S"
+			fi
+		else
+			out "${p}_$S: read-back FAILED (not readable)"; bad="$bad ${p}_$S"
+		fi
+	done
+	[ -z "$bad" ] || { err "read-back failed for:$bad; not activating"; return 6; }
+	# 5. Activate (one short boot control lock).
+	set_phase activate
+	a="$(bc_with_lock do_activate "$S" "$TOKEN" "$rb" 2>&1)"; rc=$?
+	take_msgs "$rc" "$a"
+	n="$(printf '%s\n' "$a" | sed -n 's/^@act //p')"
+	if [ -n "$n" ]; then
+		set -- $n
+		out "bootctrl activate slot $S: old=$1 requested=$2 read-back=$3"
+	fi
+	if [ "$rc" != 0 ]; then
+		if [ -n "$n" ]; then err "activating slot $S failed; the next boot slot is uncertain (read-back $3); not rebooting"
+		else err "slot $S written and verified, but not activated (rc $rc); slot $BC_CUR stays the next boot slot"
+		fi
+		return 6
+	fi
+	# 6. The reservation is removed and the result written by restore_end.
+	PHASE=done
+	log "slot $S restored from backup $BACKUP_ID and selected for the next boot (trial: retry 02, success 00; returns to slot $BC_CUR if it does not boot). Not rebooting."
+	return 0
+}
+
+# result ----------------------------------------------------------------------------------------------------------
+
+do_result() {
+	local d="$1" st pid bid
+	stage_dir_ok "$d" || return 3
+	[ -f "$d/result" ] && [ ! -L "$d/result" ] || { echo "no result in $d: no restore was started with this run directory"; return 3; }
+	st="$(sed -n 's/^state=//p' "$d/result" | head -n 1)"
+	cat "$d/result"
+	case "$st" in
+	done|failed|refused) return 0 ;;
+	esac
+	pid="$(sed -n 's/^pid=//p' "$d/result" | head -n 1)"; bid="$(sed -n 's/^boot_id=//p' "$d/result" | head -n 1)"
+	if [ -n "$st" ] && [ -n "$pid" ] && [ "$bid" = "$(boot_id)" ] && kill -0 "$pid" 2>/dev/null; then
+		echo "the restore is still running (pid $pid)"
+		return 4
+	fi
+	echo "the restore run ended without a final result (interrupted or lost); its outcome is unknown: check 'air6-slot status' and 'air6-stock verify'"
+	return 5
+}
+
+# Main ------------------------------------------------------------------------------------------------------------
+
+cmd="$1"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+backup)
+	[ $# = 2 ] && is_slot "$1" && [ "$2" = - ] || usage ;;
+confirm)
+	[ $# = 3 ] && is_slot "$1" && is_hex "$2" 32 && is_hex "$3" 64 || usage ;;
+verify)
+	[ $# = 1 ] && is_slot "$1" || usage ;;
+stage)
+	[ $# = 0 ] || usage ;;
+restore)
+	[ $# = 2 ] && is_slot "$1" && [ -n "$2" ] || usage ;;
+result)
+	[ $# = 1 ] && [ -n "$1" ] || usage ;;
+*)
+	usage ;;
+esac
+
+case "$cmd" in
+stage) do_stage; exit $? ;;
+result) do_result "$1"; exit $? ;;
+confirm)
+	trap '' HUP PIPE
+	trap cleanup EXIT
+	mk_mt || exit 5
+	with_marker_lock do_confirm "$@"; exit $? ;;
+esac
+
+bc_init || exit 5
+case "$cmd" in
+backup)
+	trap '' HUP PIPE
+	trap cleanup EXIT
+	trap 'exit 5' INT TERM
+	mk_mt || exit 5
+	do_backup "$@"; exit $? ;;
+verify)
+	trap cleanup EXIT
+	trap 'exit 5' INT TERM
+	do_verify "$1"; exit $? ;;
+restore)
+	trap '' HUP PIPE
+	trap 'restore_end $([ "$WROTE" = 1 ] && echo 6 || echo 5); cleanup' EXIT
+	trap on_signal INT TERM
+	restore_main "$@"; rc=$?
+	restore_end "$rc"; rc=$?
+	cleanup
+	trap - EXIT
+	exit "$rc" ;;
+esac
