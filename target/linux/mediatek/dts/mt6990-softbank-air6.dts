@@ -25,13 +25,16 @@
 	};
 
 	/*
-	 * LK keeps these arguments and appends its own (root=, bootslot=, ...).
+	 * LK keeps these arguments and appends its own (bootslot=, ...).
+	 * root= must be the stock value /dev/mmcblk0p24: LK replaces exactly that
+	 * string with the booted slot's rootfs (p26 on slot a, p39 on slot b); any
+	 * other value is left as is and boots the same rootfs from both slots.
 	 * clk_ignore_unused and fw_devlink=off keep clocks and probe order as in the
 	 * stock firmware; the ramoops region matches /reserved-memory; the
 	 * air6_dt_bootargs=1 marker shows that the arguments came from this file.
 	 */
 	chosen {
-		bootargs = "console=tty0 console=ttyS0,115200n1 init=/etc/preinit root=/dev/mmcblk0p39 rootwait loglevel=8 androidboot.selinux=permissive androidboot.hardware=mt6990 mtk_printk_ctrl.disable_uart=0 clk_ignore_unused fw_devlink=off deferred_probe_timeout=10 pci=pcie_bus_safe ramoops.mem_address=0x9c100000 ramoops.mem_size=0xe0000 ramoops.record_size=0x1000 ramoops.pmsg_size=0x10000 ramoops.console_size=0x40000 ramoops.ftrace_size=0x1000 air6_dt_bootargs=1";
+		bootargs = "console=tty0 console=ttyS0,115200n1 init=/etc/preinit root=/dev/mmcblk0p24 rootwait loglevel=8 androidboot.selinux=permissive androidboot.hardware=mt6990 mtk_printk_ctrl.disable_uart=0 clk_ignore_unused fw_devlink=off deferred_probe_timeout=10 pci=pcie_bus_safe ramoops.mem_address=0x9c100000 ramoops.mem_size=0xe0000 ramoops.record_size=0x1000 ramoops.pmsg_size=0x10000 ramoops.console_size=0x40000 ramoops.ftrace_size=0x1000 air6_dt_bootargs=1";
 	};
 
 	keys {
