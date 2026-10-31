@@ -15,7 +15,7 @@ define Device/softbank_air6
   KERNEL := kernel-bin
   DEVICE_DTS := mt6990-softbank-air6
   DEVICE_DTS_DIR := ../dts
-  DEVICE_PACKAGES := kmod-mt7996e wpad-mbedtls kmod-usb-mtu3 kmod-usb-storage \
+  DEVICE_PACKAGES := air6-tools kmod-mt7996e wpad-mbedtls kmod-usb-mtu3 kmod-usb-storage \
 	kmod-fs-vfat kmod-nls-cp437 kmod-nls-iso8859-1 kmod-nls-utf8
   FILESYSTEMS := squashfs
   IMAGES := kernel.bin dtb rootfs.img
