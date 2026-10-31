@@ -1,11 +1,13 @@
 #!/bin/sh
 # A/B slot control for the SoftBank Air 6.
 #
-#   air6-slot status            booted and next slot, boot control bytes, image policy, trial timer, failed updates
+#   air6-slot status            booted and next slot, boot control bytes, image policy, trial timer, failed updates,
+#                               the last sysupgrade record
 #   air6-slot current           print the booted slot (a or b)
 #   air6-slot boot-done         (init, end of boot) mark the booted slot successful; reset the other slot's retry
 #                               when it is above 3, recording it first when that slot never succeeded. Not a health
-#                               check. Safe to run again after a failed write.
+#                               check. Safe to run again after a failed write. Also keeps the record of the last
+#                               sysupgrade from the pstore (a failure there never changes the result).
 #   air6-slot set-active SLOT   boot SLOT (a or b) next time; SLOT must be successful and no update of the other
 #                               slot may be running (exit 4). Does not reboot.
 #   air6-slot trial arm         (init, early boot) trial image whose booted slot is not successful yet: return to
@@ -23,6 +25,9 @@ TAG=air6-slot
 : "${AIR6_SLOT_ETC:=/etc/air6-slot}"
 EVENTS="$AIR6_SLOT_ETC/failed-events"
 EVENTS_KEEP=10
+LAST_UPGRADE="$AIR6_SLOT_ETC/last-upgrade"
+: "${AIR6_SLOT_PSTORE:=/sys/fs/pstore}"
+UPGRADE_REC=air6-upgrade/1
 TIMER="$AIR6_SLOT_RUN/timer"
 TRIAL_SECONDS=600
 # At expiry the lock is tried without waiting every EXPIRE_PAUSE seconds until EXPIRE_WINDOW seconds after the
@@ -72,8 +77,42 @@ record_event() {
 	fi
 }
 
+# import_upgrade: keep the record of the latest sysupgrade run (lines "air6-upgrade/1 token=T ...", see
+# /lib/air6/upgrade.sh) found in the pstore pmsg in $LAST_UPGRADE, then remove the pstore file. The latest run is the
+# token of the last record line; when it has no begin or no end line it is kept as incomplete ("result unknown"),
+# never replaced by an older complete run. The same run is stored once, but an incomplete copy is replaced by a
+# complete one. Runs outside the lock; a failure is logged and changes nothing else.
+# $LAST_UPGRADE: line 1 the token, line 2 "imported_boot_id=<boot> complete=<0|1>", then the record lines.
+import_upgrade() {
+	local f="$AIR6_SLOT_PSTORE/pmsg-ramoops-0" lines token complete=0 tmp
+	[ -f "$f" ] || return 0
+	lines="$(grep -a "^$UPGRADE_REC token=[0-9a-f-]* " "$f" 2>/dev/null)"
+	[ -n "$lines" ] || { rm -f "$f" 2>/dev/null; return 0; }
+	token="$(printf '%s\n' "$lines" | tail -n 1 | cut -d' ' -f2)"
+	lines="$(printf '%s\n' "$lines" | grep -F "$UPGRADE_REC $token " | tail -n 60)"
+	printf '%s\n' "$lines" | grep -q ' phase=begin ' && printf '%s\n' "$lines" | grep -q ' end=1 ' && complete=1
+	if [ -f "$LAST_UPGRADE" ] && [ "$(sed -n 1p "$LAST_UPGRADE")" = "$token" ] &&
+		{ [ "$complete" = 0 ] || sed -n 2p "$LAST_UPGRADE" | grep -q ' complete=1$'; }; then
+		rm -f "$f" 2>/dev/null
+		return 0
+	fi
+	tmp="$LAST_UPGRADE.tmp"
+	if mkdir -p "$AIR6_SLOT_ETC" && {
+		echo "$token"
+		echo "imported_boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) complete=$complete"
+		printf '%s\n' "$lines"
+	} > "$tmp" && mv "$tmp" "$LAST_UPGRADE"; then
+		rm -f "$f" 2>/dev/null
+		log "sysupgrade record $token kept in $LAST_UPGRADE (complete=$complete)"
+	else
+		rm -f "$tmp" 2>/dev/null
+		err "sysupgrade record $token NOT saved to $LAST_UPGRADE (left in $f)"
+	fi
+	return 0
+}
+
 do_boot_done() {
-	local r n rc o="$BC_OTHER" c="$BC_CUR" oretry
+	local r n rc m o="$BC_OTHER" c="$BC_CUR" oretry
 	r="$(bc_read)" || return 5
 	bc_valid "$r" || { err "unexpected boot control record $r; nothing changed"; return 5; }
 	n="$r"
@@ -82,7 +121,9 @@ do_boot_done() {
 		record_event "$r"
 	fi
 	[ "$oretry" -gt 3 ] && n="$(bc_reset_retry "$n" "$o")"
-	if is_trial && [ "$(bc_get "$r" "$c" success)" = 00 ]; then
+	if m="$(bc_root_check)"; [ $? = 1 ]; then
+		err "slot $c: $m (wrong root= in the image's device tree?); not marked successful"
+	elif is_trial && [ "$(bc_get "$r" "$c" success)" = 00 ]; then
 		echo "slot $c: trial, not successful yet; left unchanged until 'air6-slot trial commit'"
 	else
 		n="$(bc_mark_success "$n" "$c")"
@@ -121,7 +162,7 @@ do_set_active() {
 }
 
 do_status() {
-	local r s left
+	local r s left m
 	r="$(bc_read)" || return 5
 	echo "booted=$BC_CUR"
 	echo "next=$(bc_next "$r")"
@@ -129,6 +170,10 @@ do_status() {
 		echo "slot $s: prio=$(bc_get "$r" $s prio) retry=$(bc_get "$r" $s retry) success=$(bc_get "$r" $s success) uptype=$(bc_get "$r" $s uptype)"
 	done
 	bc_valid "$r" || echo "warning: unexpected boot control record $r"
+	m="$(bc_root_check)" && echo "root=rootfs_$BC_CUR" || case $? in
+		1) echo "WARNING: $m; this slot is not marked successful by boot-done (wrong root= in the image's device tree?)" ;;
+		*) echo "root=unknown (cannot tell which partition the root file system is on)" ;;
+	esac
 	bc_reservation >/dev/null && echo "update in progress: $(bc_reservation)"
 	if is_trial; then
 		echo "policy=trial"
@@ -154,6 +199,20 @@ do_status() {
 		sed 's/^/  /' "$EVENTS"
 	else
 		echo "failed updates: none recorded"
+	fi
+	if [ -s "$LAST_UPGRADE" ]; then
+		local e b i
+		e="$(grep ' end=1 ' "$LAST_UPGRADE" | tail -n 1)"
+		b="$(grep ' phase=begin ' "$LAST_UPGRADE" | head -n 1 | sed -n 's/.* boot_id=\([^ ]*\).*/\1/p')"
+		i="$(sed -n 2p "$LAST_UPGRADE" | sed -n 's/^imported_boot_id=\([^ ]*\) .*/\1/p')"
+		echo "last sysupgrade record ($(sed -n 1p "$LAST_UPGRADE"), started in boot ${b:-unknown}; it says whether the write finished, not whether the new slot booted):"
+		if [ -n "$e" ] && sed -n 2p "$LAST_UPGRADE" | grep -q ' complete=1$'; then
+			echo "  $(echo "$e" | cut -d' ' -f3-)"
+		else
+			echo "  incomplete record: result unknown"
+		fi
+		[ "$i" = "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ] ||
+			echo "  (kept in an earlier boot or carried by a config backup: compare its token and boot with the request)"
 	fi
 }
 
@@ -279,7 +338,9 @@ esac
 bc_init || exit 5
 case "$cmd" in
 status) bc_with_lock do_status ;;
-boot-done) bc_with_lock do_boot_done ;;
+boot-done)
+	import_upgrade
+	bc_with_lock do_boot_done ;;
 set-active) bc_with_lock do_set_active "$1" ;;
 trial)
 	case "$1" in

@@ -14,7 +14,8 @@
 # The record is written with one 10-byte write, then flushed and read back. "Verified" means that read-back
 # matched; it does not mean the write is atomic against a power cut.
 #
-# Overrides for host tests only: BC_MISC_DEV, BC_CMDLINE, BC_LOCK, BC_LOCK_TRIES, BC_RESERVATION, BC_FUNCTIONS (and
+# Overrides for host tests only: BC_MISC_DEV, BC_CMDLINE, BC_LOCK, BC_LOCK_TRIES, BC_RESERVATION, BC_FUNCTIONS,
+# BC_MOUNTINFO, BC_SYS (and
 # in air6-slot: AIR6_SLOT_LIB, AIR6_SLOT_RUN, AIR6_SLOT_ETC, AIR6_UPTIME).
 
 BC_MAGIC_OFF=2052
@@ -27,6 +28,8 @@ BC_PRIO_LOW=0e
 : "${BC_LOCK_TRIES:=10}"
 : "${BC_RESERVATION:=/tmp/air6-update}"
 : "${BC_FUNCTIONS:=/lib/functions.sh}"
+: "${BC_MOUNTINFO:=/proc/self/mountinfo}"
+: "${BC_SYS:=/sys}"
 
 # bc_cmdline_value KEY: the value of the single KEY= token on the kernel command line; fails if absent or repeated.
 bc_cmdline_value() {
@@ -47,6 +50,24 @@ bc_current() {
 }
 
 bc_opposite() { [ "$1" = a ] && echo b || echo a; }
+
+# bc_root_check: (after bc_init) 0 when the read-only root (/rom) is rootfs_<booted slot>; 1 on a mismatch (prints
+# both devices); 2 when it cannot be decided. LK selects the rootfs by replacing root=/dev/mmcblk0p24 on the kernel
+# command line; an image with another root= boots the same rootfs from both slots.
+bc_root_check() {
+	local mm want= u
+	mm="$(awk '$5 == "/rom" { print $3; exit }' "$BC_MOUNTINFO" 2>/dev/null)"
+	[ -n "$mm" ] || return 2
+	for u in "$BC_SYS"/block/mmcblk0/mmcblk0p*/uevent; do
+		[ "$(sed -n 's/^PARTNAME=//p' "$u" 2>/dev/null)" = "rootfs_$BC_CUR" ] || continue
+		want="$(cat "${u%/uevent}/dev" 2>/dev/null)"
+		break
+	done
+	[ -n "$want" ] || return 2
+	[ "$mm" = "$want" ] && return 0
+	echo "the root file system is device $mm, but rootfs_$BC_CUR is $want"
+	return 1
+}
 
 # bc_init: check the board and the magic, set BC_DEV, BC_CUR and BC_OTHER.
 bc_init() {
