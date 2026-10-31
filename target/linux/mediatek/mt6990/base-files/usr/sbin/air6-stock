@@ -14,7 +14,8 @@
 #   air6-stock result DIR                     print the outcome of the restore run in DIR
 #
 # Exit codes: 0 done, 2 usage, 3 refused (nothing changed), 4 busy (nothing changed), 5 environment or read error
-# (nothing changed), 6 failed after a write was started (restore: see its phase; the target stays unsuccessful).
+# (nothing changed), 6 a change was started and the run did not complete, or its result is uncertain (restore: its
+# "outcome:" lines say what is known about the partitions, the boot control record and the update reservation).
 # 'result' exits 0 for a finished run (its own rc is in the output), 3 when DIR holds no result, 4 while the run is
 # still going, 5 when the run ended without a final result.
 #
@@ -389,7 +390,7 @@ do_backup() {
 		echo "unit=$unit"
 		echo "created=$(now_utc)"
 		echo "stock_version=$STOCK_VERSION"
-		h="$(head -c 262144 "$STAGE/md1img_$s.img" | grep -a -o -m1 "$VER_RE" | head -n 1)"
+		h="$(head -c 262144 "$STAGE/md1img_$s.img" 2>/dev/null | grep -a -o -m1 "$VER_RE" | head -n 1)"
 		echo "md1img_version=${h:-unknown}"
 		for p in $ALL; do echo "size_${p}_$s=$(psize "$p")"; done
 	} > "$STAGE/META" || { err "cannot write META"; return 5; }
@@ -517,58 +518,146 @@ stage_dir_ok() {
 
 # restore ---------------------------------------------------------------------------------------------------------
 
-# Run state: RD (run directory), S (slot), PHASE, WROTE (1 once a write was started), RES_TOKEN, BACKUP_ID.
-RD= S= PHASE= WROTE=0 CLAIMED= BACKUP_ID= TOKEN= STARTED= FINAL=
+# Run state: RD (run directory), S (slot), PHASE, WROTE (1 once a write was started or may have been), RES_TOKEN,
+# BACKUP_ID. What is known about the boot control record: REC_OLD (read before the invalidate), REC_LAST (the last
+# record read), REC_SURE (empty once a misc write of this run has an unknown outcome), ACTIVATED (the activate was
+# read back). PARTS: the partitions whose write was started, VERIFIED: all 4 were read back as the backup. RES_LEFT:
+# own (this run's reservation could not be removed) or other (the reservation is another run's). SIG: an INT or TERM
+# that arrived during a boot control change (handled once the outcome of the change is known).
+RD= S= PHASE= WROTE=0 CLAIMED= BACKUP_ID= TOKEN= STARTED= FINAL= FINAL_RC=
+REC_OLD= REC_LAST= REC_SURE=1 ACTIVATED= PARTS= VERIFIED= RES_LEFT= SIG=
 
-# result_put STATE RC: replace RD/result.
+# result_put STATE RC: replace RD/result; 1 when it cannot be saved.
 result_put() {
 	{
-		echo "state=$1"
-		echo "rc=$2"
-		echo "phase=$PHASE"
-		echo "slot=$S"
-		echo "backup_id=$BACKUP_ID"
-		echo "token=$TOKEN"
-		echo "pid=$$"
-		echo "boot_id=$(boot_id)"
-		echo "started=$STARTED"
-		echo "updated=$(now_utc)"
-		echo "--"
-		printf '%s' "$REPORT"
-	} > "$RD/result.tmp" 2>/dev/null && mv -f "$RD/result.tmp" "$RD/result" 2>/dev/null && return 0
-	echo "error: the result could not be saved in $RD/result" >&2
-	return 1
+		{
+			echo "state=$1"
+			echo "rc=$2"
+			echo "phase=$PHASE"
+			echo "slot=$S"
+			echo "backup_id=$BACKUP_ID"
+			echo "token=$TOKEN"
+			echo "pid=$$"
+			echo "boot_id=$(boot_id)"
+			echo "started=$STARTED"
+			echo "updated=$(now_utc)"
+			echo "--"
+			printf '%s' "$REPORT"
+		} > "$RD/result.tmp" && mv -f "$RD/result.tmp" "$RD/result"
+	} 2>/dev/null
 }
 
-# set_phase PHASE: record the phase in the result (state running).
-set_phase() { PHASE="$1"; result_put running ""; }
+# set_phase PHASE: record the phase in the result (state running). A result that cannot be saved stops the run: 5
+# before the first write (nothing changed), 6 after it.
+set_phase() {
+	PHASE="$1"
+	result_put running "" && return 0
+	if [ "$WROTE" = 1 ]; then
+		err "the result could not be saved in $RD/result at phase $1; stopping"
+		return 6
+	fi
+	err "the result could not be saved in $RD/result; stopping before any write, nothing changed"
+	return 5
+}
 
-# restore_end RC: (once) release the reservation, write the final result, drop the uploaded images.
+# fail_rc: the rc of a run that ends early.
+fail_rc() { if [ "$WROTE" = 1 ]; then echo 6; else echo 5; fi; }
+
+# outcome: what the run changed, from the partition writes and the last boot control record read. It never claims
+# more than that record shows.
+outcome() {
+	local t n
+	if [ "$WROTE" = 1 ]; then
+		if [ -z "$PARTS" ]; then out "outcome: no partition of slot $S was written"
+		elif [ "$VERIFIED" = 1 ]; then out "outcome: mcf1, mcf2, boot and rootfs of slot $S were written and read back as the backup"
+		else out "outcome: slot $S is partly written (writes started:$PARTS)"
+		fi
+		if [ "$ACTIVATED" = 1 ]; then
+			out "outcome: slot $S was activated: it is the next boot slot as a trial (bootctrl read back $REC_LAST)"
+		elif [ -z "$REC_SURE" ] || ! bc_valid "$REC_LAST"; then
+			out "outcome: the boot control record may have changed (last read: ${REC_LAST:-none}); the next boot slot is uncertain: check 'air6-slot status' before rebooting"
+		else
+			t="$(bc_get "$REC_LAST" "$S" success)"; n="$(bc_next "$REC_LAST")"
+			if [ "$REC_LAST" = "$REC_OLD" ]; then
+				out "outcome: the boot control record is unchanged ($REC_LAST): slot $S success $t, next boot slot $n"
+			elif [ "$t" = 00 ]; then
+				out "outcome: slot $S stays unsuccessful (not selectable); next boot slot $n (bootctrl $REC_LAST, last read)"
+			else
+				out "outcome: slot $S is marked successful in the last record read ($REC_LAST), next boot slot $n: check 'air6-slot status' before rebooting"
+			fi
+		fi
+	fi
+	case "$RES_LEFT" in
+	own) out "outcome: this run's update reservation remains until the unit reboots; 'air6-slot set-active' is refused until then" ;;
+	other) out "outcome: the update reservation is another run's and was left as it is; 'air6-slot set-active' is refused while it exists" ;;
+	esac
+}
+
+# restore_end RC: (once) release the reservation, report the outcome, write the final result, drop the uploaded
+# images. Returns the final rc (also on later calls): never 0 when the reservation stayed or the result was not saved.
 restore_end() {
 	local rc="$1" st p
-	[ -z "$FINAL" ] || return "$rc"
-	FINAL=1
+	[ -z "$FINAL" ] || return "$FINAL_RC"
+	FINAL=1 FINAL_RC="$rc"
 	trap '' INT TERM
 	if [ -n "$RES_TOKEN" ]; then
-		release "$RES_TOKEN" || { [ "$rc" = 0 ] && { rc=6; PHASE=release; }; }
+		release "$RES_TOKEN"
+		case $? in
+		0) ;;
+		3) RES_LEFT=other ;;
+		*) RES_LEFT=own ;;
+		esac
+		[ -n "$RES_LEFT" ] && [ "$rc" = 0 ] && { rc=6; PHASE=release; }
+		RES_TOKEN=
 	fi
 	if [ -n "$CLAIMED" ]; then
 		for p in $RESTORED; do rm -f "$RD/${p}_$S.img"; done
 		out "uploaded images removed from $RD (a retry needs a new 'air6-stock stage' and upload)"
+		if [ "$rc" != 0 ]; then
+			out "restore of slot $S: rc $rc in phase $PHASE"
+			outcome
+		fi
 		case "$rc" in 0) st=done ;; 6) st=failed ;; *) st=refused ;; esac
-		[ "$rc" = 0 ] || out "restore of slot $S: rc $rc in phase $PHASE$([ "$WROTE" = 1 ] && echo "; slot $S stays unsuccessful (not selectable), the booted slot $BC_CUR stays as it was unless reported above")"
-		result_put "$st" "$rc"
+		if ! result_put "$st" "$rc"; then
+			if [ "$ACTIVATED" = 1 ]; then
+				err "slot $S was activated, but the result could not be saved in $RD/result ('air6-stock result' cannot show this outcome)"
+			else
+				err "the result could not be saved in $RD/result ('air6-stock result' cannot show this outcome)"
+			fi
+			[ "$rc" = 0 ] && rc=6
+		fi
 	fi
+	FINAL_RC="$rc"
 	return "$rc"
 }
 
 on_signal() {
 	err "interrupted in phase $PHASE"
-	if [ "$WROTE" = 1 ]; then restore_end 6; exit 6; fi
-	restore_end 5; exit 5
+	restore_end "$(fail_rc)"
+	exit $?
 }
 
-# do_admit SLOT TOKEN FIELDS: (boot control lock held) step 3. Lines starting with @ carry data for the caller.
+# sig_defer, sig_resume: around a boot control change, INT and TERM only set SIG; once the outcome of the change is
+# known, a pending one is handled by on_signal.
+sig_defer() { SIG=; trap 'SIG=INT' INT; trap 'SIG=TERM' TERM; }
+sig_resume() { trap on_signal INT TERM; [ -z "$SIG" ] || on_signal; }
+
+# in_lock CMD [ARGS]: (boot control lock held, in a subshell) run CMD with INT and TERM ignored, so that a signal
+# cannot stop it between a write and the report of its outcome. "@end RC" marks a CMD that ran to its end.
+in_lock() {
+	trap '' INT TERM
+	"$@"
+	set -- $?
+	echo "@end $1"
+	return "$1"
+}
+
+# data TEXT KEY: the rest of the first "@KEY ..." line of TEXT. has_line TEXT LINE: TEXT has the line LINE.
+data() { printf '%s\n' "$1" | sed -n "s/^@$2 //p" | head -n 1; }
+has_line() { printf '%s\n' "$1" | grep -qx -- "$2"; }
+
+# do_admit SLOT TOKEN FIELDS: (boot control lock held) step 3. Lines starting with @ carry data for the caller;
+# @write comes right before the misc write.
 do_admit() {
 	local r n rc
 	r="$(bc_read)" || return 5
@@ -581,20 +670,23 @@ do_admit() {
 	n="$(bc_invalidate "$r" "$1")" || { echo "error: slot $1 cannot be invalidated; nothing changed" >&2; return 3; }
 	reserve_locked "$2" "$3" || return $?
 	echo "@reserved"
+	echo "@write"
 	bc_write "$r" "$n"; rc=$?
 	echo "@inv $r $n $(bc_read 2>/dev/null || echo unknown)"
 	return "$rc"
 }
 
-# do_activate SLOT TOKEN EXPECTED: (boot control lock held) step 5.
+# do_activate SLOT TOKEN EXPECTED: (boot control lock held) step 5. @cur is the record found.
 do_activate() {
 	local r n rc
+	r="$(bc_read)" || { echo "error: boot control record not readable; not activating" >&2; return 5; }
+	echo "@cur $r"
 	bc_reservation_owned "$2" ||
 		{ echo "error: the update reservation is no longer this run's ($(bc_reservation || echo none)); not activating" >&2; return 3; }
-	r="$(bc_read)" || { echo "error: boot control record not readable; not activating" >&2; return 5; }
 	[ "$r" = "$3" ] ||
 		{ echo "error: the boot control record changed since slot $1 was invalidated ($3 -> $r); not activating" >&2; return 3; }
 	n="$(bc_activate_written "$r" "$1")" || { echo "error: slot $1 cannot be activated from $r; not activating" >&2; return 3; }
+	echo "@write"
 	bc_write "$r" "$n"; rc=$?
 	echo "@act $r $n $(bc_read 2>/dev/null || echo unknown)"
 	return "$rc"
@@ -620,7 +712,7 @@ restore_main() {
 	( set -C; : > "$RD/result" ) 2>/dev/null ||
 		{ err "$RD was already used by a restore run (or is not writable); stage a new run directory"; return 3; }
 	CLAIMED=1
-	set_phase input
+	set_phase input || return $?
 	mk_mt || return 5
 	exp="$(printf '%s\n' META SHA256SUMS result $(for p in $RESTORED; do echo "${p}_$S.img"; done) | sort)"
 	names="$(ls -A "$RD" 2>/dev/null | sort)"
@@ -652,7 +744,7 @@ restore_main() {
 	[ "$free" -ge "$RESTORE_MIN_KB" ] || { err "not enough space in /tmp: ${free} KiB free, ${RESTORE_MIN_KB} KiB needed"; return 5; }
 	out "input: backup $BACKUP_ID of slot $S, created $(meta_get "$RD/META" created), stock $(meta_get "$RD/META" stock_version), md1img $(meta_get "$RD/META" md1img_version); META, SHA256SUMS and 4 images checked"
 	# 2. Target (no change).
-	set_phase target
+	set_phase target || return $?
 	[ "$S" != "$BC_CUR" ] || { err "slot $S is the booted slot; restore the other slot"; return 3; }
 	[ -e "$AIR6_STOCK_MODEM_DETACHED" ] &&
 		{ err "a modem stop left file systems detached ($AIR6_STOCK_MODEM_DETACHED); reboot first"; return 3; }
@@ -664,38 +756,56 @@ restore_main() {
 	done
 	[ -z "$bad" ] || { err "slot $S differs from the backup in partitions that are never written:$bad; not restoring"; return 3; }
 	out "target: slot $S not booted, restored partitions not in use, the 11 fixed partitions match the backup"
-	# 3. Admission (one short boot control lock).
-	set_phase admission
+	# 3. Admission (one short boot control lock). INT and TERM wait until its outcome is known.
+	set_phase admission || return $?
 	TOKEN="$(rand_hex)"; is_hex "$TOKEN" 32 || { TOKEN=; err "no random token"; return 5; }
-	a="$(bc_with_lock do_admit "$S" "$TOKEN" "boot_id=$(boot_id) pid=$$ target=$S backup_id=$BACKUP_ID phase=restore-write" 2>&1)"
+	sig_defer
+	a="$(bc_with_lock in_lock do_admit "$S" "$TOKEN" "boot_id=$(boot_id) pid=$$ target=$S backup_id=$BACKUP_ID phase=restore-write" 2>&1)"
 	rc=$?
 	take_msgs "$rc" "$a"
-	case "$a" in *@reserved*) RES_TOKEN="$TOKEN" ;; esac
-	rb="$(printf '%s\n' "$a" | sed -n 's/^@inv //p')"
+	REC_OLD="$(data "$a" rec)"
+	if has_line "$a" @reserved; then
+		RES_TOKEN="$TOKEN"
+	elif [ -n "$REC_OLD" ] && [ -z "$(data "$a" end)" ] && bc_with_lock bc_reservation_owned "$TOKEN" 2>/dev/null; then
+		# Cut off around the reservation: it is this run's only if it carries this run's token.
+		RES_TOKEN="$TOKEN"
+	fi
+	rb="$(data "$a" inv)"
 	if [ -n "$rb" ]; then
 		WROTE=1
 		set -- $rb
+		REC_LAST="$3"
+		[ "$3" = "$1" ] || [ "$3" = "$2" ] || REC_SURE=
+		[ "$rc" = 0 ] && [ "$3" != "$2" ] && rc=6
 		out "bootctrl invalidate slot $S: old=$1 requested=$2 read-back=$3"
+	elif has_line "$a" @write; then
+		WROTE=1 REC_SURE=
+		REC_LAST="$(bc_read 2>/dev/null)" || REC_LAST=unknown
+		out "bootctrl invalidate slot $S: old=$REC_OLD, cut off before its read-back (rc $rc); record read now: $REC_LAST"
 	fi
 	if [ "$rc" != 0 ]; then
+		[ -z "$SIG" ] || err "interrupted in phase $PHASE"
 		[ "$WROTE" = 1 ] && { PHASE=invalidate; err "invalidating slot $S failed; no partition written"; return 6; }
 		[ -n "$RES_TOKEN" ] && return 6
-		return "$rc"
+		case "$rc" in 3|4|5) return "$rc" ;; esac
+		return 5
 	fi
-	rb="$3"
+	rb="$REC_LAST"
+	sig_resume
 	# 4. Write, flush, drop caches, read back.
 	for p in $RESTORED; do
-		set_phase "write-${p}_$S"
+		set_phase "write-${p}_$S" || return 6
+		PARTS="$PARTS ${p}_$S"
 		dd if="$RD/${p}_$S.img" of="$(pdev "$p")" bs=1M conv=notrunc,fsync 2>/dev/null ||
 			{ err "writing ${p}_$S failed; not activating"; return 6; }
 		out "${p}_$S: written ($(psize "$p") bytes)"
 	done
-	set_phase sync
+	set_phase sync || return 6
 	sync
-	set_phase drop-caches
+	set_phase drop-caches || return 6
 	echo 3 > "$AIR6_STOCK_PROC/sys/vm/drop_caches" 2>/dev/null ||
 		{ err "dropping the page cache failed; a read-back would not be from the eMMC; not activating"; return 6; }
-	set_phase read-back
+	set_phase read-back || return 6
 	bad=
 	for p in $RESTORED; do
 		want="$(sums_get "$RD/SHA256SUMS" "${p}_$S.img")"
@@ -708,21 +818,36 @@ restore_main() {
 		fi
 	done
 	[ -z "$bad" ] || { err "read-back failed for:$bad; not activating"; return 6; }
-	# 5. Activate (one short boot control lock).
-	set_phase activate
-	a="$(bc_with_lock do_activate "$S" "$TOKEN" "$rb" 2>&1)"; rc=$?
+	VERIFIED=1
+	# 5. Activate (one short boot control lock). INT and TERM wait until its outcome is known.
+	set_phase activate || return 6
+	sig_defer
+	a="$(bc_with_lock in_lock do_activate "$S" "$TOKEN" "$rb" 2>&1)"; rc=$?
 	take_msgs "$rc" "$a"
-	n="$(printf '%s\n' "$a" | sed -n 's/^@act //p')"
+	n="$(data "$a" cur)"
+	[ -z "$n" ] || REC_LAST="$n"
+	n="$(data "$a" act)"
 	if [ -n "$n" ]; then
 		set -- $n
+		REC_LAST="$3"
 		out "bootctrl activate slot $S: old=$1 requested=$2 read-back=$3"
+		if [ "$rc" = 0 ] && [ "$3" = "$2" ]; then ACTIVATED=1; else REC_SURE=; fi
+	elif has_line "$a" @write; then
+		REC_SURE=
+		REC_LAST="$(bc_read 2>/dev/null)" || REC_LAST=unknown
+		out "bootctrl activate slot $S: cut off before its read-back (rc $rc); record read now: $REC_LAST"
 	fi
+	[ "$rc" = 0 ] && [ -z "$ACTIVATED" ] && rc=6
 	if [ "$rc" != 0 ]; then
-		if [ -n "$n" ]; then err "activating slot $S failed; the next boot slot is uncertain (read-back $3); not rebooting"
-		else err "slot $S written and verified, but not activated (rc $rc); slot $BC_CUR stays the next boot slot"
+		[ -z "$SIG" ] || err "interrupted in phase $PHASE"
+		if [ -z "$REC_SURE" ]; then
+			err "activating slot $S failed; the next boot slot is uncertain (record read: $REC_LAST): check 'air6-slot status'; not rebooting"
+		else
+			err "slot $S written and verified, but not activated (rc $rc); boot control record $REC_LAST: next boot slot $(bc_next "$REC_LAST")"
 		fi
 		return 6
 	fi
+	sig_resume
 	# 6. The reservation is removed and the result written by restore_end.
 	PHASE=done
 	log "slot $S restored from backup $BACKUP_ID and selected for the next boot (trial: retry 02, success 00; returns to slot $BC_CUR if it does not boot). Not rebooting."
@@ -794,7 +919,7 @@ verify)
 	do_verify "$1"; exit $? ;;
 restore)
 	trap '' HUP PIPE
-	trap 'restore_end $([ "$WROTE" = 1 ] && echo 6 || echo 5); cleanup' EXIT
+	trap 'restore_end "$(fail_rc)"; rc=$?; cleanup; exit "$rc"' EXIT
 	trap on_signal INT TERM
 	restore_main "$@"; rc=$?
 	restore_end "$rc"; rc=$?
